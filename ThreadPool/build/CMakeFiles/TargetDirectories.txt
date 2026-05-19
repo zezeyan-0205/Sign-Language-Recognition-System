@@ -1,3 +1,0 @@
-/home/fzy/code/rk111/ThreadPool/build/CMakeFiles/ThreadPool.dir
-/home/fzy/code/rk111/ThreadPool/build/CMakeFiles/edit_cache.dir
-/home/fzy/code/rk111/ThreadPool/build/CMakeFiles/rebuild_cache.dir
