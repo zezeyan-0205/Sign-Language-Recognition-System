@@ -1,15 +1,12 @@
 #include <iostream>
-#include "ThreadPool.hpp"
+#include "Pipeline.hpp"
 
 int main()
 {
-    ThreadPool pool(4);
+    std::cout << "RK3588 sign-language async pipeline demo\n";
 
-    auto result = pool.enqueue([](int a, int b) {
-        return a + b;
-    }, 3, 7);
-
-    std::cout << "Result: " << result.get() << std::endl;
+    SignLanguagePipeline pipeline(12);
+    pipeline.run();
 
     return 0;
 }
