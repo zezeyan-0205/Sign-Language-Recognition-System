@@ -6,12 +6,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_executable(SignLanguagePipeline
     src/main.cpp
-    src/ThreadPool.cpp
-    src/Pipeline.cpp
+    concurrency/src/ThreadPool.cpp
+    pipeline/src/Pipeline.cpp
 )
 
 target_include_directories(SignLanguagePipeline PRIVATE
-    ${PROJECT_SOURCE_DIR}/inc
+    ${PROJECT_SOURCE_DIR}
 )
 
 find_package(Threads REQUIRED)

@@ -1,1 +1,4 @@
 /build/
+.codex
+.agents
+.vscode
