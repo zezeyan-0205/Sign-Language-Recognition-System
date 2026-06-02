@@ -1,8 +1,13 @@
 #include "pipeline/inc/Pipeline.hpp"
 
+#include "pipeline/inc/CameraCapture.hpp"
+#include "pipeline/inc/RgaProcessor.hpp"
+
 #include <iomanip>
 #include <iostream>
+#include <opencv2/imgcodecs.hpp>
 #include <sstream>
+#include <utility>
 
 namespace {
 
@@ -29,10 +34,27 @@ void logStage(const std::string& stage, int frame_id, const std::string& detail)
     std::cout << oss.str();
 }
 
+std::string fourccToString(std::uint32_t fourcc)
+{
+    std::string value(4, ' ');
+    value[0] = static_cast<char>(fourcc & 0xFF);
+    value[1] = static_cast<char>((fourcc >> 8) & 0xFF);
+    value[2] = static_cast<char>((fourcc >> 16) & 0xFF);
+    value[3] = static_cast<char>((fourcc >> 24) & 0xFF);
+    return value;
+}
+
+void pushCaptureStop(BlockingQueue<RawFrame>& raw_queue)
+{
+    RawFrame stop_frame;
+    stop_frame.stop = true;
+    raw_queue.push(std::move(stop_frame));
+}
+
 } // namespace
 
-SignLanguagePipeline::SignLanguagePipeline(int frame_count)
-    : frame_count_(frame_count), completed_frames_(0)
+SignLanguagePipeline::SignLanguagePipeline(int frame_count, std::string camera_device)
+    : frame_count_(frame_count), camera_device_(std::move(camera_device)), completed_frames_(0)
 {
 }
 
@@ -71,24 +93,32 @@ void SignLanguagePipeline::join()
 
 void SignLanguagePipeline::captureLoop()
 {
+    V4L2CameraCapture camera(camera_device_);
+    if (!camera.open()) {
+        pushCaptureStop(raw_queue_);
+        return;
+    }
+
     for (int frame_id = 0; frame_id < frame_count_; ++frame_id) {
-        // 这里暂时模拟  60 FPS 左右的摄像头输入。
-        simulateWork(16);
         RawFrame frame;
-        frame.frame_id = frame_id;
-        frame.capture_time = std::chrono::steady_clock::now();
-        logStage("capture", frame_id, "camera frame acquired");
+        if (!camera.readFrame(frame_id, frame)) {
+            break;
+        }
+        logStage("capture", frame_id,
+                 "camera frame acquired, " + std::to_string(frame.width) + "x" + std::to_string(frame.height) +
+                     ", format=" + fourccToString(frame.pixel_format) + ", bytes=" + std::to_string(frame.data.size()));
         raw_queue_.push(std::move(frame));
     }
 
     // 采集结束后发送停止信号，后续 stage 会逐级把停止信号继续向下传递。
-    RawFrame stop_frame;
-    stop_frame.stop = true;
-    raw_queue_.push(std::move(stop_frame));
+    pushCaptureStop(raw_queue_);
 }
 
 void SignLanguagePipeline::preprocessLoop()
 {
+    RgaProcessor rga_processor;
+    bool saved_first_frame = false;
+
     while (true) {
         RawFrame raw = raw_queue_.pop();
         if (raw.stop) {
@@ -99,13 +129,38 @@ void SignLanguagePipeline::preprocessLoop()
             return;
         }
 
-        simulateWork(5);
         PreprocessedFrame frame;
         frame.frame_id = raw.frame_id;
         frame.capture_time = raw.capture_time;
-        // 后续这里会替换为 RGA resize/color space conversion 的真实输出格式。
-        frame.layout = "RGB888 640x640";
-        logStage("preprocess", frame.frame_id, "resize/csc placeholder -> " + frame.layout);
+
+        const std::size_t y_size = static_cast<std::size_t>(raw.width) * static_cast<std::size_t>(raw.height);
+        const bool has_nm12_planes = raw.data.size() >= y_size + y_size / 2;
+        if (!has_nm12_planes) {
+            frame.layout = "invalid raw frame";
+            logStage("preprocess", frame.frame_id, "RGA skipped, raw data is too small");
+            preprocess_queue_.push(std::move(frame));
+            continue;
+        }
+
+        uint8_t* y_plane = raw.data.data();
+        uint8_t* uv_plane = raw.data.data() + y_size;
+        const bool converted = rga_processor.ImgConvertNM12ToBGR(y_plane, uv_plane, raw.width, raw.height,
+                                                                 frame.bgr_image);
+        if (converted) {
+            frame.layout = "BGR888 640x640";
+            logStage("preprocess", frame.frame_id, "RGA NM12 -> " + frame.layout);
+
+            if (!saved_first_frame) {
+                saved_first_frame = cv::imwrite("rga_first_frame.jpg", frame.bgr_image);
+                logStage("preprocess", frame.frame_id,
+                         saved_first_frame ? "saved rga_first_frame.jpg" : "failed to save rga_first_frame.jpg");
+            }
+        } else {
+            frame.layout = fourccToString(raw.pixel_format) + " " + std::to_string(raw.width) + "x" +
+                std::to_string(raw.height);
+            logStage("preprocess", frame.frame_id, "RGA conversion failed, keeping " + frame.layout);
+        }
+
         preprocess_queue_.push(std::move(frame));
     }
 }
