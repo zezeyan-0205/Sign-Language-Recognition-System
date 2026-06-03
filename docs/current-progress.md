@@ -7,10 +7,10 @@
 项目目标是基于 RK3588 开发医院门诊无障碍双向手语交互系统。当前阶段聚焦在第一条基础数据链路：
 
 ```text
-摄像头输入 -> V4L2 采集 -> 多线程流水线 -> 后续 RGA/RKNN/GRU 接入
+摄像头输入 -> V4L2 采集 -> RGA 预处理 -> Mock 算法接口 -> MIPI 屏实时显示 -> 后续 RKNN/GRU 接入
 ```
 
-现阶段尚未接入真实 YOLO、Hand21、GRU 模型，主要目标是把板端摄像头采集和流水线框架跑稳，为后续硬件加速和算法模块预留结构。
+现阶段尚未接入真实 YOLO、Hand21、GRU 模型，主要目标是把板端摄像头采集、RGA 图像预处理、Mock 算法接口和屏幕显示闭环跑稳，为后续模型模块预留结构。
 
 ## 已完成工作
 
@@ -69,8 +69,10 @@ VIDIOC_STREAMON failed: Operation not permitted
 ```text
 pipeline/inc/FrameTypes.hpp
 pipeline/inc/CameraCapture.hpp
+pipeline/inc/RgaProcessor.hpp
 pipeline/inc/Pipeline.hpp
 pipeline/src/CameraCapture.cpp
+pipeline/src/RgaProcessor.cpp
 pipeline/src/Pipeline.cpp
 ```
 
@@ -78,8 +80,69 @@ pipeline/src/Pipeline.cpp
 
 - `FrameTypes.hpp`：定义各阶段传递的数据结构，例如 `RawFrame`、`PreprocessedFrame`、`DetectedHand`、`KeypointFeature`、`RecognitionResult`。
 - `CameraCapture.hpp/.cpp`：封装 V4L2 摄像头采集逻辑，负责打开设备、设置格式、mmap buffer、启动 stream、读取帧和释放资源。
+- `RgaProcessor.hpp/.cpp`：封装 RGA 图像转换逻辑，将 V4L2 采集到的 NM12/NV12M 数据转换并缩放为 `BGR888 640x640`。
 - `Pipeline.hpp/.cpp`：保留多线程流水线调度逻辑，负责 capture / preprocess / hand-detect / keypoints / sequence / output 等阶段。
 - `main.cpp`：程序入口，解析摄像头设备和帧数参数。
+
+### 5. RGA 预处理验证
+
+已在 RK3588 板端验证：
+
+```text
+/dev/rga 存在
+/usr/include/rga/RgaApi.h 存在
+/usr/include/rga/rga.h 存在
+/usr/lib/aarch64-linux-gnu/librga.so 存在
+```
+
+RGA 转换模块已接入 `preprocessLoop()`，当前处理链路为：
+
+```text
+RawFrame NM12/NV12M
+    -> 拆分 Y plane / UV plane 指针
+    -> RgaProcessor::ImgConvertNM12ToBGR()
+    -> BGR888 640x640 cv::Mat
+    -> 保存首帧 rga_first_frame.jpg
+```
+
+板端测试已生成：
+
+```text
+rga_first_frame.jpg
+```
+
+用户已人工确认该图片颜色和比例正常，说明当前 V4L2 到 RGA 再到 OpenCV BGR 图像的基础链路已经跑通。
+
+### 6. Mock 算法接口与实时显示验证
+
+已完成从算法占位到可视化输出的核心闭环：
+
+```text
+BGR888 640x640 cv::Mat
+    -> handDetectLoop() 伪造手部检测框
+    -> keypointLoop() 伪造 21 个手部关键点
+    -> sequenceLoop() 周期性生成病历文本
+    -> outputLoop() 绘制绿框、红点和状态栏
+    -> cv::imshow() 投递到 MIPI 屏幕桌面
+```
+
+新增统一的 `DetectionResult` 结构体，用于在 mock 算法链路中携带：
+
+- `cv::Rect hand_box`
+- `std::vector<cv::Point2f> keypoints`
+- `std::string text_result`
+- `cv::Mat bgr_image`
+
+输出线程已实现：
+
+- 实时计算显示 FPS。
+- 在画面上绘制绿色手部检测框。
+- 在画面上绘制 21 个红色骨骼点。
+- 在画面底部绘制半透明黑色状态栏。
+- 在状态栏中显示 mock 病历文本、FPS 和端到端延迟。
+- 支持通过 `q` 或 `Esc` 退出显示窗口。
+
+板端已经完成测试，MIPI 屏幕能够弹窗实时显示画框、骨骼点和病历文本，说明当前端到端可视化 Demo 骨架已经跑通。
 
 ## 当前流水线状态
 
@@ -99,17 +162,24 @@ sequenceLoop
 outputLoop
 ```
 
-目前除采集阶段外，其余算法阶段仍是占位模拟：
+目前采集和预处理阶段已经使用真实硬件链路，算法阶段为标准 mock 接口，可视化输出已在板端显示验证：
 
-- `preprocessLoop`：打印输入帧格式，未来替换为 RGA resize / color conversion。
-- `handDetectLoop`：固定模拟 YOLO/RKNN 检测置信度。
-- `keypointLoop`：固定模拟 21 个手部关键点。
-- `sequenceLoop`：固定模拟 GRU/LSTM 输出文本。
-- `outputLoop`：打印识别文本和端到端延迟。
+- `captureLoop`：通过 V4L2 从摄像头读取 NM12/NV12M 原始帧。
+- `preprocessLoop`：通过 RGA 将 NM12/NV12M 转换并缩放为 `BGR888 640x640`，并保存第一帧用于验证。
+- `handDetectLoop`：伪造手部检测框，作为后续 YOLO/RKNN 输出接口占位。
+- `keypointLoop`：伪造 21 个手部关键点，作为后续 Hand21 输出接口占位。
+- `sequenceLoop`：周期性生成 mock 病历文本，作为后续 GRU/状态机输出接口占位。
+- `outputLoop`：绘制检测框、关键点、状态栏、FPS 和端到端延迟，并通过 OpenCV 实时显示。
 
 ## 当前程序行为
 
-程序现在会读取摄像头帧，但不会显示画面。原因是当前程序只完成了采集和流水线传递，没有创建图像窗口，也没有把 `NV12/NM12` 转成可显示的 RGB/BGR 图像。
+程序现在会读取摄像头帧，通过 RGA 生成 `BGR888 640x640` 的 `cv::Mat`，并在 MIPI 屏桌面上实时显示 mock 可视化结果。
+
+程序第一次成功完成 RGA 转换时会生成：
+
+```text
+rga_first_frame.jpg
+```
 
 如果要直接看画面，当前推荐使用手册中的 GStreamer 命令：
 
@@ -125,6 +195,18 @@ gst-launch-1.0 v4l2src device=/dev/video11 ! \
 gst-launch-1.0 v4l2src device=/dev/video11 num-buffers=1 ! \
   video/x-raw,format=NV12,width=640,height=480 ! \
   mppjpegenc ! filesink location=pic.jpg
+```
+
+如果要让 OpenCV 窗口显示到板子的 MIPI 屏幕，运行程序前需要在终端配置显示环境：
+
+```bash
+export DISPLAY=:0.0
+```
+
+如果远程 SSH 运行时遇到显示权限问题，可在板子的图形桌面终端执行：
+
+```bash
+xhost +SI:localuser:elf
 ```
 
 ## 编译和运行
@@ -144,6 +226,14 @@ cmake --build build
 ./build/SignLanguagePipeline /dev/video11 120
 ```
 
+运行后检查 RGA 首帧输出：
+
+```bash
+ls -lh rga_first_frame.jpg
+```
+
+实时窗口打开后，可按 `q` 或 `Esc` 退出显示。
+
 运行 USB 摄像头示例：
 
 ```bash
@@ -157,19 +247,30 @@ v4l2-ctl --list-devices
 
 1. MIPI 摄像头不能只看 `/dev/video11` 是否存在，还要确认 sensor 是否真正挂到 media pipeline。
 2. 如果出现 `Not active sensor` 或 `check rkisp_mainpath link or isp input`，优先检查 MIPI 排线、摄像头型号、设备树和系统镜像。
-3. 当前 `RawFrame::data` 会把 mmap buffer 内容复制到 `std::vector`，这有利于先验证功能，但不是最终高性能零拷贝方案。
-4. 当前还没有显示模块，也没有保存首帧功能。
-5. 当前还没有接入 RGA、RKNN、OpenCV 图像预处理和真实模型。
+3. 当前 `RawFrame::data` 会把 mmap buffer 内容复制到 `std::vector`，并且 RGA 输入前会临时拼接连续 NV12 缓冲，这有利于先验证功能，但不是最终高性能零拷贝方案。
+4. 当前实时显示依赖桌面环境和 `DISPLAY`，纯 SSH 无显示权限时需要先配置 X11/桌面权限。
+5. 当前还没有接入 RKNN、YOLO、Hand21 和真实时序模型。
 
 ## 下一步建议
 
-1. 增加一个调试功能：保存首帧为文件，方便 SSH 下确认摄像头画面。
-2. 把摄像头参数做成配置项，例如 width、height、format、frame_count。
-3. 引入 RGA 预处理模块，先完成 `NM12/NV12 -> RGB/BGR 640x640` 的 resize 和颜色转换。
-4. 接入 YOLO RKNN 手部检测模型，先跑单帧检测。
-5. 接入 Hand21 关键点提取，形成手部拓扑特征。
-6. 接入 GRU 时序模型和状态机文本拼接逻辑。
+1. 把摄像头参数做成配置项，例如 width、height、format、frame_count。
+2. 将 `handDetectLoop()` 的 mock 逻辑替换为 YOLO RKNN 手部检测模型，先跑单帧检测。
+3. 将 `keypointLoop()` 的 mock 逻辑替换为 Hand21 关键点提取，形成手部拓扑特征。
+4. 将 `sequenceLoop()` 的 mock 文本替换为 GRU 时序模型和状态机文本拼接逻辑。
+5. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
 
 ## 当前阶段结论
 
-当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + 多线程流水线骨架”阶段。摄像头采集方向选择正确，代码结构也已经拆出独立采集模块，后续可以围绕 RGA 预处理和 RKNN 模型推理继续扩展。
+当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化”阶段。摄像头采集、RGA 图像转换和端到端显示闭环已经实测成立，后续可以围绕 RKNN 手部检测模型推理继续扩展。
+
+当前阶段已提交：
+
+```text
+939fea5 feat(pipeline): add camera capture and RGA preprocessing
+```
+
+本次显示闭环提交：
+
+```text
+feat(pipeline): add mock visualization output
+```

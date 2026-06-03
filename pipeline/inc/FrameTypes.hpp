@@ -29,28 +29,15 @@ struct PreprocessedFrame {
     cv::Mat bgr_image;
 };
 
-// 手部检测阶段输出的结果，后续会承载手部 ROI 和检测置信度。
-struct DetectedHand {
+// Mock 算法链路统一结果：检测框、21 点骨骼、文本结果和可视化图像逐级填充。
+struct DetectionResult {
     int frame_id = -1;
     bool stop = false;
     std::chrono::steady_clock::time_point capture_time;
-    float confidence = 0.0F;
-};
-
-// 关键点阶段输出的拓扑特征，目标是表示 21 个手部骨骼点。
-struct KeypointFeature {
-    int frame_id = -1;
-    bool stop = false;
-    std::chrono::steady_clock::time_point capture_time;
-    std::size_t keypoint_count = 0;
-};
-
-// 时序模型阶段输出的识别文本。
-struct RecognitionResult {
-    int frame_id = -1;
-    bool stop = false;
-    std::chrono::steady_clock::time_point capture_time;
-    std::string text;
+    cv::Mat bgr_image;
+    cv::Rect hand_box;
+    std::vector<cv::Point2f> keypoints;
+    std::string text_result;
 };
 
 #endif

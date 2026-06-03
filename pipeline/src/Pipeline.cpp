@@ -3,11 +3,15 @@
 #include "pipeline/inc/CameraCapture.hpp"
 #include "pipeline/inc/RgaProcessor.hpp"
 
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -49,6 +53,63 @@ void pushCaptureStop(BlockingQueue<RawFrame>& raw_queue)
     RawFrame stop_frame;
     stop_frame.stop = true;
     raw_queue.push(std::move(stop_frame));
+}
+
+cv::Rect makeMockHandBox(int frame_id, int image_width, int image_height)
+{
+    const int box_width = image_width / 3;
+    const int box_height = image_height / 2;
+    const int travel = image_width / 8;
+    const int x = image_width / 2 - box_width / 2 + (frame_id % 60 - 30) * travel / 30;
+    const int y = image_height / 2 - box_height / 2;
+    return cv::Rect(std::max(0, x), std::max(0, y), box_width, box_height) &
+        cv::Rect(0, 0, image_width, image_height);
+}
+
+std::vector<cv::Point2f> makeMockKeypoints(const cv::Rect& box)
+{
+    std::vector<cv::Point2f> points;
+    points.reserve(21);
+    points.emplace_back(box.x + box.width * 0.50F, box.y + box.height * 0.85F);
+
+    for (int finger = 0; finger < 5; ++finger) {
+        const float base_x = box.x + box.width * (0.18F + finger * 0.16F);
+        for (int joint = 0; joint < 4; ++joint) {
+            const float x = base_x + (joint - 1.5F) * box.width * 0.025F;
+            const float y = box.y + box.height * (0.70F - joint * 0.17F);
+            points.emplace_back(x, y);
+        }
+    }
+
+    return points;
+}
+
+std::string makeMockMedicalText(int frame_id)
+{
+    static const std::vector<std::string> texts = {
+        "Chief: fever and cough",
+        "Chief: headache",
+        "Chief: chest tightness",
+        "Chief: stomach pain"
+    };
+    return texts[(frame_id / 45) % texts.size()];
+}
+
+void drawStatusBar(cv::Mat& image, const std::string& text, double fps, long latency_ms)
+{
+    const int bar_height = 86;
+    const cv::Rect bar(0, image.rows - bar_height, image.cols, bar_height);
+    cv::Mat overlay = image.clone();
+    cv::rectangle(overlay, bar, cv::Scalar(0, 0, 0), cv::FILLED);
+    cv::addWeighted(overlay, 0.58, image, 0.42, 0.0, image);
+
+    cv::putText(image, text, cv::Point(24, image.rows - 38), cv::FONT_HERSHEY_SIMPLEX,
+                1.05, cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+    std::ostringstream oss;
+    oss << "FPS: " << std::fixed << std::setprecision(1) << fps << "  Latency: " << latency_ms << " ms";
+    cv::putText(image, oss.str(), cv::Point(24, image.rows - 12), cv::FONT_HERSHEY_SIMPLEX,
+                0.62, cv::Scalar(200, 255, 200), 1, cv::LINE_AA);
 }
 
 } // namespace
@@ -171,81 +232,118 @@ void SignLanguagePipeline::handDetectLoop()
         PreprocessedFrame input = preprocess_queue_.pop();
         if (input.stop) {
             // 保持停止信号只走正常队列路径，避免下游线程永久阻塞在 pop。
-            DetectedHand stop_frame;
+            DetectionResult stop_frame;
             stop_frame.stop = true;
             hand_queue_.push(std::move(stop_frame));
             return;
         }
 
         simulateWork(8);
-        DetectedHand hand;
-        hand.frame_id = input.frame_id;
-        hand.capture_time = input.capture_time;
-        // 这里暂时用固定置信度模拟 YOLO/RKNN 手部检测结果。
-        hand.confidence = 0.92F;
-        logStage("hand-detect", hand.frame_id, "YOLO/RKNN placeholder, confidence=0.92");
-        hand_queue_.push(std::move(hand));
+        DetectionResult result;
+        result.frame_id = input.frame_id;
+        result.capture_time = input.capture_time;
+        result.bgr_image = input.bgr_image;
+        if (!result.bgr_image.empty()) {
+            result.hand_box = makeMockHandBox(result.frame_id, result.bgr_image.cols, result.bgr_image.rows);
+        }
+        logStage("hand-detect", result.frame_id, "mock hand box generated");
+        hand_queue_.push(std::move(result));
     }
 }
 
 void SignLanguagePipeline::keypointLoop()
 {
     while (true) {
-        DetectedHand hand = hand_queue_.pop();
-        if (hand.stop) {
+        DetectionResult result = hand_queue_.pop();
+        if (result.stop) {
             // 逐级传递 stop，保证流水线按顺序自然排空和退出。
-            KeypointFeature stop_frame;
+            DetectionResult stop_frame;
             stop_frame.stop = true;
             keypoint_queue_.push(std::move(stop_frame));
             return;
         }
 
         simulateWork(6);
-        KeypointFeature feature;
-        feature.frame_id = hand.frame_id;
-        feature.capture_time = hand.capture_time;
-        // 手部拓扑模型固定输出 21 个关键点，当前 demo 只保留数量字段。
-        feature.keypoint_count = 21;
-        logStage("keypoints", feature.frame_id, "21-point topology feature extracted");
-        keypoint_queue_.push(std::move(feature));
+        result.keypoints = makeMockKeypoints(result.hand_box);
+        logStage("keypoints", result.frame_id, "mock 21-point topology generated");
+        keypoint_queue_.push(std::move(result));
     }
 }
 
 void SignLanguagePipeline::sequenceLoop()
 {
     while (true) {
-        KeypointFeature feature = keypoint_queue_.pop();
-        if (feature.stop) {
+        DetectionResult result = keypoint_queue_.pop();
+        if (result.stop) {
             // 通知输出线程结束，整个流水线至此开始收尾。
-            RecognitionResult stop_frame;
+            DetectionResult stop_frame;
             stop_frame.stop = true;
             result_queue_.push(std::move(stop_frame));
             return;
         }
 
         simulateWork(4);
-        RecognitionResult result;
-        result.frame_id = feature.frame_id;
-        result.capture_time = feature.capture_time;
-        // 暂时用交替文本模拟 GRU/LSTM 动态手语识别输出。
-        result.text = feature.frame_id % 2 == 0 ? "hello" : "thanks";
-        logStage("sequence", result.frame_id, "GRU/LSTM placeholder -> " + result.text);
+        result.text_result = makeMockMedicalText(result.frame_id);
+        logStage("sequence", result.frame_id, "mock text -> " + result.text_result);
         result_queue_.push(std::move(result));
     }
 }
 
 void SignLanguagePipeline::outputLoop()
 {
+    const std::string window_name = "RK3588 Sign Language Demo";
+    cv::namedWindow(window_name, cv::WINDOW_NORMAL);
+    cv::resizeWindow(window_name, 960, 960);
+
+    auto fps_time = std::chrono::steady_clock::now();
+    int fps_frames = 0;
+    double display_fps = 0.0;
+
     while (true) {
-        RecognitionResult result = result_queue_.pop();
+        DetectionResult result = result_queue_.pop();
         if (result.stop) {
             // 输出线程收到 stop 后打印统计信息并退出。
             std::cout << "Pipeline completed " << completed_frames_.load() << " frames.\n";
+            cv::destroyWindow(window_name);
             return;
         }
 
         ++completed_frames_;
+        ++fps_frames;
+        const auto now = std::chrono::steady_clock::now();
+        const auto fps_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - fps_time).count();
+        if (fps_elapsed >= 1000) {
+            display_fps = fps_frames * 1000.0 / static_cast<double>(fps_elapsed);
+            fps_frames = 0;
+            fps_time = now;
+        }
+
+        if (result.bgr_image.empty()) {
+            logStage("output", result.frame_id, "empty image, display skipped");
+            continue;
+        }
+
+        cv::Mat display = result.bgr_image.clone();
+        if (result.hand_box.area() > 0) {
+            cv::rectangle(display, result.hand_box, cv::Scalar(0, 255, 0), 3, cv::LINE_AA);
+        }
+        for (const cv::Point2f& point : result.keypoints) {
+            cv::circle(display, cv::Point(cvRound(point.x), cvRound(point.y)), 5,
+                       cv::Scalar(0, 0, 255), cv::FILLED, cv::LINE_AA);
+        }
+
+        const long latency_ms = elapsedMs(result.capture_time);
+        drawStatusBar(display, result.text_result, display_fps, latency_ms);
+        cv::imshow(window_name, display);
+
+        const int key = cv::waitKey(1);
+        if (key == 27 || key == 'q' || key == 'Q') {
+            std::cout << "Display stopped by user.\n";
+            cv::destroyWindow(window_name);
+            return;
+        }
+
         logStage("output", result.frame_id,
-                 "text=\"" + result.text + "\", latency=" + std::to_string(elapsedMs(result.capture_time)) + "ms");
+                 "text=\"" + result.text_result + "\", latency=" + std::to_string(latency_ms) + "ms");
     }
 }

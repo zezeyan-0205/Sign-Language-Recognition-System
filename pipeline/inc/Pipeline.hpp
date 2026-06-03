@@ -42,9 +42,9 @@ private:
     // 相邻 stage 之间的消息队列：上游 push，下游 pop。
     BlockingQueue<RawFrame> raw_queue_;
     BlockingQueue<PreprocessedFrame> preprocess_queue_;
-    BlockingQueue<DetectedHand> hand_queue_;
-    BlockingQueue<KeypointFeature> keypoint_queue_;
-    BlockingQueue<RecognitionResult> result_queue_;
+    BlockingQueue<DetectionResult> hand_queue_;
+    BlockingQueue<DetectionResult> keypoint_queue_;
+    BlockingQueue<DetectionResult> result_queue_;
 };
 
 #endif
