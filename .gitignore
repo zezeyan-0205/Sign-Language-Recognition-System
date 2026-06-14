@@ -2,3 +2,5 @@
 .codex
 .agents
 .vscode
+/dataset_keypoints
+__pycache__/
