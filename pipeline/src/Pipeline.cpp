@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <linux/videodev2.h>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -194,22 +195,40 @@ void SignLanguagePipeline::preprocessLoop()
         frame.frame_id = raw.frame_id;
         frame.capture_time = raw.capture_time;
 
-        const std::size_t y_size = static_cast<std::size_t>(raw.width) * static_cast<std::size_t>(raw.height);
-        const bool has_nm12_planes = raw.data.size() >= y_size + y_size / 2;
-        if (!has_nm12_planes) {
-            frame.layout = "invalid raw frame";
-            logStage("preprocess", frame.frame_id, "RGA skipped, raw data is too small");
-            preprocess_queue_.push(std::move(frame));
-            continue;
+        bool converted = false;
+        std::string conversion_path;
+
+        if (raw.pixel_format == V4L2_PIX_FMT_NV12M || raw.pixel_format == V4L2_PIX_FMT_NV12) {
+            const std::size_t y_size =
+                static_cast<std::size_t>(raw.width) * static_cast<std::size_t>(raw.height);
+            const std::size_t required_size = y_size + y_size / 2;
+            if (raw.data.size() >= required_size) {
+                uint8_t* y_plane = raw.data.data();
+                uint8_t* uv_plane = raw.data.data() + y_size;
+                converted = rga_processor.ImgConvertNM12ToBGR(
+                    y_plane, uv_plane, raw.width, raw.height, frame.bgr_image);
+                conversion_path = "NM12";
+            } else {
+                logStage("preprocess", frame.frame_id, "NM12 frame is smaller than width*height*3/2");
+            }
+        } else if (raw.pixel_format == V4L2_PIX_FMT_YUYV) {
+            const std::size_t required_size =
+                static_cast<std::size_t>(raw.width) * static_cast<std::size_t>(raw.height) * 2;
+            if (raw.data.size() >= required_size) {
+                converted = rga_processor.ImgConvertYUYVToBGR(
+                    raw.data.data(), raw.width, raw.height, frame.bgr_image);
+                conversion_path = "YUYV";
+            } else {
+                logStage("preprocess", frame.frame_id, "YUYV frame is smaller than width*height*2");
+            }
+        } else {
+            logStage("preprocess", frame.frame_id,
+                     "unsupported RGA input format " + fourccToString(raw.pixel_format));
         }
 
-        uint8_t* y_plane = raw.data.data();
-        uint8_t* uv_plane = raw.data.data() + y_size;
-        const bool converted = rga_processor.ImgConvertNM12ToBGR(y_plane, uv_plane, raw.width, raw.height,
-                                                                 frame.bgr_image);
         if (converted) {
             frame.layout = "BGR888 640x640";
-            logStage("preprocess", frame.frame_id, "RGA NM12 -> " + frame.layout);
+            logStage("preprocess", frame.frame_id, "RGA " + conversion_path + " -> " + frame.layout);
 
             if (!saved_first_frame) {
                 saved_first_frame = cv::imwrite("rga_first_frame.jpg", frame.bgr_image);

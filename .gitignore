@@ -4,3 +4,8 @@
 .vscode
 /dataset_keypoints
 __pycache__/
+venv_sign/
+*.pth
+*.onnx
+*.rknn
+label_map.json

@@ -4,6 +4,19 @@
 #include <iostream>
 #include <vector>
 
+namespace {
+
+bool prepareBgrOutput(cv::Mat& dst_bgr_640)
+{
+    if (dst_bgr_640.empty() || dst_bgr_640.rows != 640 || dst_bgr_640.cols != 640 ||
+        dst_bgr_640.type() != CV_8UC3 || !dst_bgr_640.isContinuous()) {
+        dst_bgr_640.create(640, 640, CV_8UC3);
+    }
+    return !dst_bgr_640.empty() && dst_bgr_640.isContinuous();
+}
+
+} // namespace
+
 bool RgaProcessor::ImgConvertNM12ToBGR(uint8_t* plane0_y_ptr,
                                        uint8_t* plane1_uv_ptr,
                                        int src_w,
@@ -15,9 +28,9 @@ bool RgaProcessor::ImgConvertNM12ToBGR(uint8_t* plane0_y_ptr,
         return false;
     }
 
-    if (dst_bgr_640.empty() || dst_bgr_640.rows != 640 || dst_bgr_640.cols != 640 ||
-        dst_bgr_640.type() != CV_8UC3 || !dst_bgr_640.isContinuous()) {
-        dst_bgr_640.create(640, 640, CV_8UC3);
+    if (!prepareBgrOutput(dst_bgr_640)) {
+        std::cerr << "Failed to allocate BGR output for RGA conversion.\n";
+        return false;
     }
 
     rga_info_t src;
@@ -43,6 +56,44 @@ bool RgaProcessor::ImgConvertNM12ToBGR(uint8_t* plane0_y_ptr,
     const int ret = c_RkRgaBlit(&src, &dst, nullptr);
     if (ret != 0) {
         std::cerr << "c_RkRgaBlit NM12 -> BGR failed, ret=" << ret << '\n';
+        return false;
+    }
+
+    return true;
+}
+
+bool RgaProcessor::ImgConvertYUYVToBGR(uint8_t* yuyv_ptr,
+                                       int src_w,
+                                       int src_h,
+                                       cv::Mat& dst_bgr_640)
+{
+    if (yuyv_ptr == nullptr || src_w <= 0 || src_h <= 0 || (src_w % 2) != 0) {
+        std::cerr << "Invalid YUYV input for RGA conversion.\n";
+        return false;
+    }
+
+    if (!prepareBgrOutput(dst_bgr_640)) {
+        std::cerr << "Failed to allocate BGR output for RGA conversion.\n";
+        return false;
+    }
+
+    rga_info_t src;
+    rga_info_t dst;
+    std::memset(&src, 0, sizeof(src));
+    std::memset(&dst, 0, sizeof(dst));
+
+    // UVC 的 YUYV 是单平面 packed 4:2:2，RGA 可直接完成颜色转换和缩放。
+    src.mmuFlag = 1;
+    src.virAddr = yuyv_ptr;
+    rga_set_rect(&src.rect, 0, 0, src_w, src_h, src_w, src_h, RK_FORMAT_YUYV_422);
+
+    dst.mmuFlag = 1;
+    dst.virAddr = dst_bgr_640.data;
+    rga_set_rect(&dst.rect, 0, 0, 640, 640, 640, 640, RK_FORMAT_BGR_888);
+
+    const int ret = c_RkRgaBlit(&src, &dst, nullptr);
+    if (ret != 0) {
+        std::cerr << "c_RkRgaBlit YUYV -> BGR failed, ret=" << ret << '\n';
         return false;
     }
 
