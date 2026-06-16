@@ -2,9 +2,11 @@
 .codex
 .agents
 .vscode
+.VSCodeCounter/
 /dataset_keypoints
 __pycache__/
 venv_sign/
+/artifacts/
 *.pth
 *.onnx
 *.rknn

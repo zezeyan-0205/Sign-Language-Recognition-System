@@ -29,9 +29,18 @@ def parse_args():
         "--input",
         help="关键点 .npy 文件，形状为 (N, 258) 或 (1, 30, 258)；不指定则使用随机输入。",
     )
+    parser.add_argument(
+        "--prepared-input",
+        action="store_true",
+        help="输入已经是预处理后的 (1, 30, 258) float32 张量，跳过补帧和归一化。",
+    )
     parser.add_argument("--repeat", type=int, default=20, help="正式计时次数。")
     parser.add_argument("--warmup", type=int, default=5, help="计时前预热次数。")
     parser.add_argument("--topk", type=int, default=3)
+    parser.add_argument(
+        "--save-output",
+        help="把最后一次 RKNN 输出 logits 保存为 .npy，方便和 ONNX 输出做数值对比。",
+    )
     parser.add_argument(
         "--check-input-consumption",
         action="store_true",
@@ -92,7 +101,7 @@ def normalize_keypoints(data):
     return data
 
 
-def prepare_input(path):
+def prepare_input(path, prepared_input=False):
     if path is None:
         rng = np.random.default_rng(42)
         return rng.standard_normal(
@@ -100,6 +109,13 @@ def prepare_input(path):
         ), "随机输入（仅验证模型能否运行）"
 
     data = np.load(path).astype(np.float32)
+    if prepared_input:
+        if data.shape != (1, SEQ_LEN, INPUT_SIZE):
+            raise ValueError(
+                f"预处理输入形状应为 (1, {SEQ_LEN}, {INPUT_SIZE})，实际为 {data.shape}"
+            )
+        return np.ascontiguousarray(data), f"{path}（已预处理）"
+
     if data.ndim == 3:
         if data.shape[0] != 1:
             raise ValueError(f"仅支持 batch=1，实际输入形状为 {data.shape}")
@@ -157,7 +173,7 @@ def main():
         raise FileNotFoundError(f"找不到输入文件：{input_path}")
 
     labels = load_labels(labels_path)
-    input_data, input_description = prepare_input(input_path)
+    input_data, input_description = prepare_input(input_path, args.prepared_input)
 
     print(f"模型：{model_path}")
     print(f"输入：{input_description}")
@@ -214,6 +230,12 @@ def main():
         raise ValueError(
             f"模型输出类别数为 {logits.size}，标签数量为 {len(labels)}"
         )
+
+    if args.save_output:
+        output_path = Path(args.save_output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(output_path, logits.astype(np.float32))
+        print(f"\n已保存 RKNN logits：{output_path}")
 
     probabilities = softmax(logits)
     topk = min(args.topk, len(labels))

@@ -66,7 +66,11 @@ def main():
         require_success(ret, "config")
 
         print("[2/4] Loading ONNX...")
-        ret = rknn.load_onnx(model=str(onnx_path))
+        ret = rknn.load_onnx(
+            model=str(onnx_path),
+            inputs=[INPUT_NAME],
+            input_size_list=INPUT_SIZE_LIST,
+        )
         require_success(ret, "load_onnx")
 
         print("[3/4] Building RKNN...")

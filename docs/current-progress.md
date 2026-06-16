@@ -1,16 +1,16 @@
 # RK3588 手语交互系统当前进度记录
 
-日期：2026-06-03
+日期：2026-06-17
 
 ## 项目背景
 
 项目目标是基于 RK3588 开发医院门诊无障碍双向手语交互系统。当前阶段聚焦在第一条基础数据链路：
 
 ```text
-摄像头输入 -> V4L2 采集 -> RGA 预处理 -> Mock 算法接口 -> MIPI 屏实时显示 -> 后续 RKNN/GRU 接入
+摄像头输入 -> V4L2 采集 -> RGA 预处理 -> Mock 算法接口 -> MIPI 屏实时显示 -> TCN/RKNN 时序识别接入
 ```
 
-现阶段尚未接入真实 YOLO、Hand21、GRU 模型，主要目标是把板端摄像头采集、RGA 图像预处理、Mock 算法接口和屏幕显示闭环跑稳，为后续模型模块预留结构。
+现阶段已经完成板端摄像头采集、RGA 图像预处理、Mock 算法接口、屏幕显示闭环，以及关键点时序模型从 GRU 到 TCN 的 RKNN 部署验证。后续重点转向 YOLO 手部检测、Hand21 关键点提取和 C++ 端真实模型接入。
 
 ## 已完成工作
 
@@ -144,6 +144,62 @@ BGR888 640x640 cv::Mat
 
 板端已经完成测试，MIPI 屏幕能够弹窗实时显示画框、骨骼点和病历文本，说明当前端到端可视化 Demo 骨架已经跑通。
 
+### 7. TCN 时序识别模型部署验证
+
+在 GRU RKNN 部署过程中，曾出现 ONNX 与 RKNN 输出差异较大、批量准确率明显下降的问题。结合论坛资料和板端实测，判断 RKNN 对 GRU/LSTM 等循环网络支持有限，因此新增 RKNN 更友好的 TCN/Conv1D 时序分类路线。
+
+当前 TCN 模型输入契约保持不变：
+
+```text
+float32 [1, 30, 258]
+```
+
+即仍然使用 30 帧关键点序列，每帧 258 维特征，并沿用训练阶段的关键点归一化策略。
+
+新增脚本结构：
+
+```text
+scripts/common/sequence_models.py
+scripts/train/train_tcn.py
+scripts/export/export_tcn_onnx.py
+scripts/export/convert_tcn_rknn.py
+scripts/eval/eval_sequence_batch.py
+```
+
+其中：
+
+- `sequence_models.py`：定义 RKNN 友好的 `TCNClassifier`。
+- `train_tcn.py`：训练 TCN 关键点时序分类模型。
+- `export_tcn_onnx.py`：导出 TCN ONNX，并验证 PyTorch/ONNX 数值一致性。
+- `convert_tcn_rknn.py`：使用 RKNN Toolkit2 2.1.0 转换 `rk3588` 目标模型。
+- `eval_sequence_batch.py`：通用关键点序列批量评估脚本，支持 ONNX、RKNN 和两份评估结果对比。
+
+板端验证环境：
+
+```text
+rknn-toolkit-lite2: 2.1.0
+librknnrt: 2.1.0
+rknn_server: 2.1.0
+NPU driver: 0.9.8
+target platform: rk3588
+```
+
+TCN 批量评估结果：
+
+```text
+样本数：180
+ONNX accuracy：0.9833
+RKNN accuracy：0.9833
+ONNX/RKNN Top1 agreement：1.0000
+Mean cosine logits：1.000000
+Mean max prob diff：0.000034
+Mismatches：0
+```
+
+测试中确认：TCN RKNN 推理不应添加 `--pass-through` 参数。添加该参数会导致板端推理阶段段错误；去掉后模型可正常运行并与 ONNX 输出高度一致。
+
+当前结论：GRU 保留为 PC/ONNX 对照基线，板端 RKNN 部署主路线切换为 TCN。
+
 ## 当前流水线状态
 
 当前 pipeline 已具备完整的线程和队列传递结构：
@@ -168,7 +224,7 @@ outputLoop
 - `preprocessLoop`：通过 RGA 将 NM12/NV12M 转换并缩放为 `BGR888 640x640`，并保存第一帧用于验证。
 - `handDetectLoop`：伪造手部检测框，作为后续 YOLO/RKNN 输出接口占位。
 - `keypointLoop`：伪造 21 个手部关键点，作为后续 Hand21 输出接口占位。
-- `sequenceLoop`：周期性生成 mock 病历文本，作为后续 GRU/状态机输出接口占位。
+- `sequenceLoop`：周期性生成 mock 病历文本，后续替换为 TCN/RKNN 时序识别结果和状态机文本拼接。
 - `outputLoop`：绘制检测框、关键点、状态栏、FPS 和端到端延迟，并通过 OpenCV 实时显示。
 
 ## 当前程序行为
@@ -249,19 +305,21 @@ v4l2-ctl --list-devices
 2. 如果出现 `Not active sensor` 或 `check rkisp_mainpath link or isp input`，优先检查 MIPI 排线、摄像头型号、设备树和系统镜像。
 3. 当前 `RawFrame::data` 会把 mmap buffer 内容复制到 `std::vector`，并且 RGA 输入前会临时拼接连续 NV12 缓冲，这有利于先验证功能，但不是最终高性能零拷贝方案。
 4. 当前实时显示依赖桌面环境和 `DISPLAY`，纯 SSH 无显示权限时需要先配置 X11/桌面权限。
-5. 当前还没有接入 RKNN、YOLO、Hand21 和真实时序模型。
+5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，但尚未接入 C++ pipeline。
+6. 当前还没有接入 YOLO、Hand21 和 C++ 端真实时序模型调用。
 
 ## 下一步建议
 
 1. 把摄像头参数做成配置项，例如 width、height、format、frame_count。
 2. 将 `handDetectLoop()` 的 mock 逻辑替换为 YOLO RKNN 手部检测模型，先跑单帧检测。
 3. 将 `keypointLoop()` 的 mock 逻辑替换为 Hand21 关键点提取，形成手部拓扑特征。
-4. 将 `sequenceLoop()` 的 mock 文本替换为 GRU 时序模型和状态机文本拼接逻辑。
-5. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
+4. 将 `sequenceLoop()` 的 mock 文本替换为 TCN/RKNN 时序模型和状态机文本拼接逻辑。
+5. 在 C++ 端接入 TCN RKNN 推理接口，完成关键点序列输入到识别文本输出的真实闭环。
+6. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
 
 ## 当前阶段结论
 
-当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化”阶段。摄像头采集、RGA 图像转换和端到端显示闭环已经实测成立，后续可以围绕 RKNN 手部检测模型推理继续扩展。
+当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证”阶段。摄像头采集、RGA 图像转换、端到端显示闭环和关键点时序模型 RKNN 部署均已实测成立，后续可以围绕 YOLO 手部检测、Hand21 关键点提取和 C++ 端 TCN RKNN 推理继续扩展。
 
 当前阶段已提交：
 
