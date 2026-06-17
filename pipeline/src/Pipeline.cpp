@@ -3,6 +3,7 @@
 #include "pipeline/inc/CameraCapture.hpp"
 #include "pipeline/inc/KeypointFeatureUtils.hpp"
 #include "pipeline/inc/KeypointSequenceBuffer.hpp"
+#include "pipeline/inc/MediaPipeKeypointExtractor.hpp"
 #include "pipeline/inc/RgaProcessor.hpp"
 #include "pipeline/inc/TcnRecognizer.hpp"
 
@@ -301,6 +302,15 @@ void SignLanguagePipeline::handDetectLoop()
 
 void SignLanguagePipeline::keypointLoop()
 {
+    MediaPipeKeypointExtractor keypoint_extractor;
+    const bool extractor_ready =
+        keypoint_extractor.load("models/pose_landmarker.task", "models/hand_landmarker.task");
+    if (extractor_ready) {
+        std::cout << "MediaPipe keypoint extractor enabled.\n";
+    } else {
+        std::cout << "MediaPipe keypoint extractor disabled; keypointLoop keeps using mock features.\n";
+    }
+
     while (true) {
         DetectionResult result = hand_queue_.pop();
         if (result.stop) {
@@ -311,10 +321,25 @@ void SignLanguagePipeline::keypointLoop()
             return;
         }
 
-        simulateWork(6);
-        result.keypoints = makeMockKeypoints(result.hand_box);
-        result.keypoint_feature = makeMockKeypointFeature(result.frame_id);
-        logStage("keypoints", result.frame_id, "mock 21-point topology and 258-D feature generated");
+        if (extractor_ready && !result.bgr_image.empty()) {
+            const int64_t timestamp_ms = static_cast<int64_t>(result.frame_id) * 33;
+            MediaPipeKeypointResult extracted = keypoint_extractor.extract(result.bgr_image, timestamp_ms);
+            if (extracted.ok) {
+                result.keypoints = std::move(extracted.display_points);
+                result.keypoint_feature = std::move(extracted.feature);
+                logStage("keypoints", result.frame_id, "MediaPipe 258-D feature generated");
+            } else {
+                simulateWork(6);
+                result.keypoints = makeMockKeypoints(result.hand_box);
+                result.keypoint_feature = makeMockKeypointFeature(result.frame_id);
+                logStage("keypoints", result.frame_id, "MediaPipe failed, fallback mock feature");
+            }
+        } else {
+            simulateWork(6);
+            result.keypoints = makeMockKeypoints(result.hand_box);
+            result.keypoint_feature = makeMockKeypointFeature(result.frame_id);
+            logStage("keypoints", result.frame_id, "mock 21-point topology and 258-D feature generated");
+        }
         keypoint_queue_.push(std::move(result));
     }
 }

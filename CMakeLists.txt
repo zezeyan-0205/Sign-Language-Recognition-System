@@ -20,6 +20,7 @@ add_executable(SignLanguagePipeline
     pipeline/src/CameraCapture.cpp
     pipeline/src/KeypointFeatureUtils.cpp
     pipeline/src/KeypointSequenceBuffer.cpp
+    pipeline/src/MediaPipeKeypointExtractor.cpp
     pipeline/src/Pipeline.cpp
     pipeline/src/RgaProcessor.cpp
     pipeline/src/TcnRecognizer.cpp

@@ -51,6 +51,10 @@ and shoulder-width normalization used by the Python training pipeline. Replace
 the mock feature producer with real C++ MediaPipe Pose + Hand keypoints after
 the C++ extractor is connected.
 
+`MediaPipeKeypointExtractor` is now wired into `keypointLoop()` as the keypoint
+source interface. If C++ MediaPipe support is not enabled at build time, the
+pipeline falls back to mock 258-D features and keeps the C++ demo runnable.
+
 Convert GRU ONNX to RKNN:
 
 ```bash
