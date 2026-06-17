@@ -1,6 +1,7 @@
 #include "pipeline/inc/Pipeline.hpp"
 
 #include "pipeline/inc/CameraCapture.hpp"
+#include "pipeline/inc/KeypointSequenceBuffer.hpp"
 #include "pipeline/inc/RgaProcessor.hpp"
 #include "pipeline/inc/TcnRecognizer.hpp"
 
@@ -97,26 +98,23 @@ std::string makeMockMedicalText(int frame_id)
     return texts[(frame_id / 45) % texts.size()];
 }
 
-std::vector<float> makeMockTcnSequence(int frame_id)
+std::vector<float> makeMockKeypointFeature(int frame_id)
 {
-    constexpr int sequence_length = 30;
     constexpr int feature_dim = 258;
-    std::vector<float> sequence(sequence_length * feature_dim, 0.0F);
+    std::vector<float> feature(feature_dim, 0.0F);
 
-    // 只用于打通 C++ RKNN 调用路径。真实接入时应替换为 Pose + Hand 关键点序列。
-    for (int t = 0; t < sequence_length; ++t) {
-        const float phase = static_cast<float>((frame_id + t) % 30) / 30.0F;
-        sequence[t * feature_dim + 11 * 4 + 0] = -0.5F;
-        sequence[t * feature_dim + 11 * 4 + 1] = 0.0F;
-        sequence[t * feature_dim + 12 * 4 + 0] = 0.5F;
-        sequence[t * feature_dim + 12 * 4 + 1] = 0.0F;
-        sequence[t * feature_dim + 132 + 0] = -0.2F + phase * 0.1F;
-        sequence[t * feature_dim + 132 + 1] = 0.4F;
-        sequence[t * feature_dim + 132 + 63 + 0] = 0.2F - phase * 0.1F;
-        sequence[t * feature_dim + 132 + 63 + 1] = 0.4F;
-    }
+    // 只用于打通 C++ 序列缓存路径。真实接入时替换为 Pose + Hand 的 258 维逐帧特征。
+    const float phase = static_cast<float>(frame_id % 30) / 30.0F;
+    feature[11 * 4 + 0] = -0.5F;
+    feature[11 * 4 + 1] = 0.0F;
+    feature[12 * 4 + 0] = 0.5F;
+    feature[12 * 4 + 1] = 0.0F;
+    feature[132 + 0] = -0.2F + phase * 0.1F;
+    feature[132 + 1] = 0.4F;
+    feature[132 + 63 + 0] = 0.2F - phase * 0.1F;
+    feature[132 + 63 + 1] = 0.4F;
 
-    return sequence;
+    return feature;
 }
 
 void drawStatusBar(cv::Mat& image, const std::string& text, double fps, long latency_ms)
@@ -314,13 +312,15 @@ void SignLanguagePipeline::keypointLoop()
 
         simulateWork(6);
         result.keypoints = makeMockKeypoints(result.hand_box);
-        logStage("keypoints", result.frame_id, "mock 21-point topology generated");
+        result.keypoint_feature = makeMockKeypointFeature(result.frame_id);
+        logStage("keypoints", result.frame_id, "mock 21-point topology and 258-D feature generated");
         keypoint_queue_.push(std::move(result));
     }
 }
 
 void SignLanguagePipeline::sequenceLoop()
 {
+    KeypointSequenceBuffer sequence_buffer(30, 258);
     TcnRecognizer recognizer;
     const bool recognizer_ready =
         !tcn_model_path_.empty() && recognizer.load(tcn_model_path_, label_path_, 30, 258);
@@ -340,8 +340,12 @@ void SignLanguagePipeline::sequenceLoop()
             return;
         }
 
-        if (recognizer_ready) {
-            const TcnRecognitionResult tcn_result = recognizer.infer(makeMockTcnSequence(result.frame_id));
+        if (!result.keypoint_feature.empty() && !sequence_buffer.push(result.keypoint_feature)) {
+            logStage("sequence", result.frame_id, "ignored invalid keypoint feature size");
+        }
+
+        if (recognizer_ready && sequence_buffer.ready() && sequence_buffer.handValidRate() >= 0.6F) {
+            const TcnRecognitionResult tcn_result = recognizer.infer(sequence_buffer.makeInput());
             if (tcn_result.ok) {
                 std::ostringstream oss;
                 oss << tcn_result.label << " (" << std::fixed << std::setprecision(2)
@@ -353,6 +357,11 @@ void SignLanguagePipeline::sequenceLoop()
                 result.text_result = makeMockMedicalText(result.frame_id);
                 logStage("sequence", result.frame_id, "TCN failed, fallback -> " + result.text_result);
             }
+        } else if (recognizer_ready) {
+            std::ostringstream oss;
+            oss << "Collecting sequence " << sequence_buffer.size() << "/8";
+            result.text_result = oss.str();
+            logStage("sequence", result.frame_id, result.text_result);
         } else {
             simulateWork(4);
             result.text_result = makeMockMedicalText(result.frame_id);

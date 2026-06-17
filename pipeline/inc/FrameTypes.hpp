@@ -37,6 +37,7 @@ struct DetectionResult {
     cv::Mat bgr_image;
     cv::Rect hand_box;
     std::vector<cv::Point2f> keypoints;
+    std::vector<float> keypoint_feature;
     std::string text_result;
 };
 

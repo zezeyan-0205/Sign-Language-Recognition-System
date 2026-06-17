@@ -44,9 +44,10 @@ Run the C++ pipeline with the TCN RKNN recognizer enabled:
   label_map.json
 ```
 
-The current C++ `sequenceLoop()` uses a mock `[1, 30, 258]` keypoint sequence
-only to verify the RKNN C API path. Replace that input with real Pose + Hand
-keypoints after the C++ keypoint stage is connected.
+The current C++ keypoint stage still creates mock per-frame 258-D features, but
+`sequenceLoop()` now uses `KeypointSequenceBuffer` to cache and resample them
+into the TCN input shape `[1, 30, 258]`. Replace the mock feature producer with
+real Pose + Hand keypoints after the C++ keypoint stage is connected.
 
 Convert GRU ONNX to RKNN:
 
