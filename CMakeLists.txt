@@ -18,6 +18,7 @@ add_executable(SignLanguagePipeline
     src/main.cpp
     concurrency/src/ThreadPool.cpp
     pipeline/src/CameraCapture.cpp
+    pipeline/src/KeypointFeatureUtils.cpp
     pipeline/src/KeypointSequenceBuffer.cpp
     pipeline/src/Pipeline.cpp
     pipeline/src/RgaProcessor.cpp

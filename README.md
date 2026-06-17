@@ -46,8 +46,10 @@ Run the C++ pipeline with the TCN RKNN recognizer enabled:
 
 The current C++ keypoint stage still creates mock per-frame 258-D features, but
 `sequenceLoop()` now uses `KeypointSequenceBuffer` to cache and resample them
-into the TCN input shape `[1, 30, 258]`. Replace the mock feature producer with
-real Pose + Hand keypoints after the C++ keypoint stage is connected.
+into the TCN input shape `[1, 30, 258]`, then applies the same shoulder-center
+and shoulder-width normalization used by the Python training pipeline. Replace
+the mock feature producer with real C++ MediaPipe Pose + Hand keypoints after
+the C++ extractor is connected.
 
 Convert GRU ONNX to RKNN:
 

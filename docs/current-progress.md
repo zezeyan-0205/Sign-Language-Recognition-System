@@ -10,7 +10,7 @@
 摄像头输入 -> V4L2 采集 -> RGA 预处理 -> Mock 算法接口 -> MIPI 屏实时显示 -> TCN/RKNN 时序识别接入
 ```
 
-现阶段已经完成板端摄像头采集、RGA 图像预处理、Mock 算法接口、屏幕显示闭环，以及关键点时序模型从 GRU 到 TCN 的 RKNN 部署验证。后续重点转向 YOLO 手部检测、Hand21 关键点提取和 C++ 端真实模型接入。
+现阶段已经完成板端摄像头采集、RGA 图像预处理、Mock 算法接口、屏幕显示闭环，以及关键点时序模型从 GRU 到 TCN 的 RKNN 部署验证。当前主线调整为继续使用 MediaPipe Pose + Hand 提取关键点，并逐步迁移到 C++ 端接入。
 
 ## 已完成工作
 
@@ -69,10 +69,12 @@ VIDIOC_STREAMON failed: Operation not permitted
 ```text
 pipeline/inc/FrameTypes.hpp
 pipeline/inc/CameraCapture.hpp
+pipeline/inc/KeypointFeatureUtils.hpp
 pipeline/inc/KeypointSequenceBuffer.hpp
 pipeline/inc/RgaProcessor.hpp
 pipeline/inc/Pipeline.hpp
 pipeline/src/CameraCapture.cpp
+pipeline/src/KeypointFeatureUtils.cpp
 pipeline/src/KeypointSequenceBuffer.cpp
 pipeline/src/RgaProcessor.cpp
 pipeline/src/Pipeline.cpp
@@ -82,6 +84,7 @@ pipeline/src/Pipeline.cpp
 
 - `FrameTypes.hpp`：定义各阶段传递的数据结构，例如 `RawFrame`、`PreprocessedFrame`、`DetectedHand`、`KeypointFeature`、`RecognitionResult`。
 - `CameraCapture.hpp/.cpp`：封装 V4L2 摄像头采集逻辑，负责打开设备、设置格式、mmap buffer、启动 stream、读取帧和释放资源。
+- `KeypointFeatureUtils.hpp/.cpp`：封装关键点特征常量和 C++ 版归一化逻辑，与 Python 训练阶段保持一致。
 - `KeypointSequenceBuffer.hpp/.cpp`：封装逐帧关键点缓存、时间维重采样和手部有效帧比例统计，输出 TCN 所需的 `[30, 258]` 输入。
 - `RgaProcessor.hpp/.cpp`：封装 RGA 图像转换逻辑，将 V4L2 采集到的 NM12/NV12M 数据转换并缩放为 `BGR888 640x640`。
 - `Pipeline.hpp/.cpp`：保留多线程流水线调度逻辑，负责 capture / preprocess / hand-detect / keypoints / sequence / output 等阶段。
@@ -304,10 +307,29 @@ pipeline/src/KeypointSequenceBuffer.cpp
     -> KeypointSequenceBuffer 缓存最近若干帧
     -> 时间维线性重采样
     -> float32 [30, 258]
+    -> KeypointFeatureUtils 关键点归一化
     -> TcnRecognizer::infer()
 ```
 
-当前 C++ `keypointLoop()` 仍然使用 mock 关键点，但已经从“一次性生成整段 mock TCN 序列”改为“逐帧生成 258 维特征，再由序列缓冲器重采样”。这样后续接入真实 Pose / Hand21 输出时，只需要替换单帧 `keypoint_feature` 的来源，TCN 输入接口不需要再重构。
+当前 C++ `keypointLoop()` 仍然使用 mock 关键点，但已经从“一次性生成整段 mock TCN 序列”改为“逐帧生成 258 维特征，再由序列缓冲器重采样”。这样后续接入真实 C++ MediaPipe Pose + Hand 输出时，只需要替换单帧 `keypoint_feature` 的来源，TCN 输入接口不需要再重构。
+
+### 11. C++ 关键点归一化对齐
+
+新增 C++ 版关键点归一化模块：
+
+```text
+pipeline/inc/KeypointFeatureUtils.hpp
+pipeline/src/KeypointFeatureUtils.cpp
+```
+
+该模块复刻 Python 训练和评估阶段的 `normalize_keypoints()` 逻辑：
+
+- 使用左肩和右肩中心作为身体中心。
+- 使用左右肩宽作为尺度。
+- 对 pose 的 `x/y/z` 做归一化，保留 visibility。
+- 对非空的 left hand / right hand `x/y/z` 使用同一中心和尺度归一化。
+
+当前 `sequenceLoop()` 在调用 `TcnRecognizer::infer()` 前，会先对 `KeypointSequenceBuffer` 输出的 `[30, 258]` 序列做归一化。这样后续 C++ MediaPipe 输出原始 landmark 后，进入 TCN 的数据契约会与 Python 训练阶段保持一致。
 
 ## 当前流水线状态
 
@@ -331,9 +353,9 @@ outputLoop
 
 - `captureLoop`：通过 V4L2 从摄像头读取 NM12/NV12M 原始帧。
 - `preprocessLoop`：通过 RGA 将 NM12/NV12M 转换并缩放为 `BGR888 640x640`，并保存第一帧用于验证。
-- `handDetectLoop`：伪造手部检测框，作为后续 YOLO/RKNN 输出接口占位。
-- `keypointLoop`：伪造 21 个手部关键点和单帧 258 维特征，作为后续 Hand21 / Pose 输出接口占位。
-- `sequenceLoop`：使用 `KeypointSequenceBuffer` 将逐帧特征重采样为 `[30, 258]`，TCN 可用时调用 RKNN 推理，否则继续输出 mock 病历文本。
+- `handDetectLoop`：伪造手部检测框，主要用于当前可视化占位；后续真实关键点主线不依赖 YOLO 手框。
+- `keypointLoop`：伪造 21 个手部关键点和单帧 258 维特征，作为后续 C++ MediaPipe Pose + Hand 输出接口占位。
+- `sequenceLoop`：使用 `KeypointSequenceBuffer` 将逐帧特征重采样为 `[30, 258]`，再按训练逻辑归一化，TCN 可用时调用 RKNN 推理，否则继续输出 mock 病历文本。
 - `outputLoop`：绘制检测框、关键点、状态栏、FPS 和端到端延迟，并通过 OpenCV 实时显示。
 
 ## 当前程序行为
@@ -416,23 +438,22 @@ v4l2-ctl --list-devices
 2. 如果出现 `Not active sensor` 或 `check rkisp_mainpath link or isp input`，优先检查 MIPI 排线、摄像头型号、设备树和系统镜像。
 3. 当前 `RawFrame::data` 会把 mmap buffer 内容复制到 `std::vector`，并且 RGA 输入前会临时拼接连续 NV12 缓冲，这有利于先验证功能，但不是最终高性能零拷贝方案。
 4. 当前实时显示依赖桌面环境和 `DISPLAY`，纯 SSH 无显示权限时需要先配置 X11/桌面权限。
-5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，并新增 C++ RKNN 推理封装和关键点序列缓冲；C++ 端 RKNN 调用链路已跑通，真实关键点输入尚未接入。
+5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，并新增 C++ RKNN 推理封装、关键点序列缓冲和关键点归一化；C++ 端 RKNN 调用链路已跑通，真实关键点输入尚未接入。
 6. Python 实时链路的主要瓶颈是 MediaPipe Pose / Hand，当前通过分频执行和低/中分辨率采集缓解。
-7. 当前还没有接入 YOLO、Hand21 和 C++ 端真实关键点输入。
+7. 当前不优先接入 YOLO/Hand21，下一阶段重点是 C++ MediaPipe Pose + Hand 的真实关键点输入。
 
 ## 下一步建议
 
 1. 把摄像头参数做成配置项，例如 width、height、format、frame_count。
-2. 将 `handDetectLoop()` 的 mock 逻辑替换为 YOLO RKNN 手部检测模型，先跑单帧检测。
-3. 将 `keypointLoop()` 的 mock 逻辑替换为 Hand21 关键点提取，形成手部拓扑特征。
-4. 将 `sequenceLoop()` 的 mock 文本替换为 TCN/RKNN 时序模型和状态机文本拼接逻辑。
-5. 将 C++ `keypointLoop()` 中的 mock 258 维逐帧特征替换为真实 Pose + Hand 关键点，完成关键点序列输入到识别文本输出的真实闭环。
-6. 评估用 YOLO/Hand21 RKNN 替换 MediaPipe 的可行性，逐步减少 Python MediaPipe 对实时帧率的限制。
-7. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
+2. 在板端确认 C++ MediaPipe / MediaPipe Tasks 的可用构建方式和链接方式。
+3. 新增 C++ `MediaPipeKeypointExtractor`，输入 `cv::Mat BGR`，输出 258 维 Pose + LeftHand + RightHand 原始特征。
+4. 将 `keypointLoop()` 中的 mock 258 维逐帧特征替换为真实 C++ MediaPipe 关键点，完成关键点序列输入到识别文本输出的真实闭环。
+5. 将 `sequenceLoop()` 的识别文本接入状态机文本拼接逻辑，形成就诊关键词输出。
+6. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
 
 ## 当前阶段结论
 
-当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证 + Python RKNN 实时摄像头 Demo + C++ TCN RKNN 调用链路 + C++ 关键点序列缓存”阶段。摄像头采集、RGA 图像转换、端到端显示闭环、关键点时序模型 RKNN 部署、Python 实时识别和 C++ RKNN 调用链路均已实测成立，后续可以围绕 YOLO 手部检测、Hand21 关键点提取和 C++ 端真实关键点输入继续扩展。
+当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证 + Python RKNN 实时摄像头 Demo + C++ TCN RKNN 调用链路 + C++ 关键点序列缓存与归一化”阶段。摄像头采集、RGA 图像转换、端到端显示闭环、关键点时序模型 RKNN 部署、Python 实时识别和 C++ RKNN 调用链路均已实测成立，后续主线调整为 C++ MediaPipe Pose + Hand 关键点接入。
 
 当前阶段已提交：
 

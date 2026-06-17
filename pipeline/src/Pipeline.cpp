@@ -1,6 +1,7 @@
 #include "pipeline/inc/Pipeline.hpp"
 
 #include "pipeline/inc/CameraCapture.hpp"
+#include "pipeline/inc/KeypointFeatureUtils.hpp"
 #include "pipeline/inc/KeypointSequenceBuffer.hpp"
 #include "pipeline/inc/RgaProcessor.hpp"
 #include "pipeline/inc/TcnRecognizer.hpp"
@@ -100,7 +101,7 @@ std::string makeMockMedicalText(int frame_id)
 
 std::vector<float> makeMockKeypointFeature(int frame_id)
 {
-    constexpr int feature_dim = 258;
+    constexpr int feature_dim = keypoint_feature::kRawFeatureDim;
     std::vector<float> feature(feature_dim, 0.0F);
 
     // 只用于打通 C++ 序列缓存路径。真实接入时替换为 Pose + Hand 的 258 维逐帧特征。
@@ -109,10 +110,10 @@ std::vector<float> makeMockKeypointFeature(int frame_id)
     feature[11 * 4 + 1] = 0.0F;
     feature[12 * 4 + 0] = 0.5F;
     feature[12 * 4 + 1] = 0.0F;
-    feature[132 + 0] = -0.2F + phase * 0.1F;
-    feature[132 + 1] = 0.4F;
-    feature[132 + 63 + 0] = 0.2F - phase * 0.1F;
-    feature[132 + 63 + 1] = 0.4F;
+    feature[keypoint_feature::kPoseDim + 0] = -0.2F + phase * 0.1F;
+    feature[keypoint_feature::kPoseDim + 1] = 0.4F;
+    feature[keypoint_feature::kPoseDim + keypoint_feature::kHandDim + 0] = 0.2F - phase * 0.1F;
+    feature[keypoint_feature::kPoseDim + keypoint_feature::kHandDim + 1] = 0.4F;
 
     return feature;
 }
@@ -320,10 +321,15 @@ void SignLanguagePipeline::keypointLoop()
 
 void SignLanguagePipeline::sequenceLoop()
 {
-    KeypointSequenceBuffer sequence_buffer(30, 258);
+    KeypointSequenceBuffer sequence_buffer(
+        keypoint_feature::kSequenceLength,
+        keypoint_feature::kRawFeatureDim);
     TcnRecognizer recognizer;
     const bool recognizer_ready =
-        !tcn_model_path_.empty() && recognizer.load(tcn_model_path_, label_path_, 30, 258);
+        !tcn_model_path_.empty() && recognizer.load(
+            tcn_model_path_, label_path_,
+            keypoint_feature::kSequenceLength,
+            keypoint_feature::kRawFeatureDim);
     if (recognizer_ready) {
         std::cout << "TCN recognizer enabled: " << tcn_model_path_ << '\n';
     } else {
@@ -345,7 +351,9 @@ void SignLanguagePipeline::sequenceLoop()
         }
 
         if (recognizer_ready && sequence_buffer.ready() && sequence_buffer.handValidRate() >= 0.6F) {
-            const TcnRecognitionResult tcn_result = recognizer.infer(sequence_buffer.makeInput());
+            std::vector<float> sequence_input = sequence_buffer.makeInput();
+            keypoint_feature::normalizeSequenceInPlace(sequence_input);
+            const TcnRecognitionResult tcn_result = recognizer.infer(sequence_input);
             if (tcn_result.ok) {
                 std::ostringstream oss;
                 oss << tcn_result.label << " (" << std::fixed << std::setprecision(2)
