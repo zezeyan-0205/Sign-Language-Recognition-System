@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import json
+import threading
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -327,6 +328,51 @@ def update_ema(previous, value, alpha=0.15):
     return previous * (1.0 - alpha) + value * alpha
 
 
+class LatestFrameReader:
+    """Background camera reader that keeps only the newest frame."""
+
+    def __init__(self, cap):
+        self.cap = cap
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.frame = None
+        self.frame_id = 0
+        self.frame_time = 0.0
+        self.read_ms = 0.0
+        self.failed = False
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.thread.join(timeout=1.0)
+
+    def latest(self):
+        with self.lock:
+            return self.frame, self.frame_id, self.frame_time, self.read_ms, self.failed
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            start = time.perf_counter()
+            ret, frame = self.cap.read()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            if not ret:
+                with self.lock:
+                    self.failed = True
+                    self.read_ms = update_ema(self.read_ms, elapsed_ms)
+                time.sleep(0.01)
+                continue
+
+            with self.lock:
+                self.frame = frame
+                self.frame_id += 1
+                self.frame_time = time.time()
+                self.read_ms = update_ema(self.read_ms, elapsed_ms)
+                self.failed = False
+
+
 def main():
     args = parse_args()
     if args.pose_interval <= 0 or args.hand_interval <= 0:
@@ -389,6 +435,8 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     cap.set(cv2.CAP_PROP_FPS, 30)
+    frame_reader = LatestFrameReader(cap)
+    frame_reader.start()
 
     # 按时间缓存，而不是按固定帧数缓存。每项为 (timestamp, keypoints)
     sequence = deque()
@@ -405,7 +453,9 @@ def main():
     hand_ms = 0.0
     rknn_ms = 0.0
     draw_ms = 0.0
+    frame_age_ms = 0.0
     frame_index = 0
+    last_frame_id = 0
     last_pose_result = None
     last_hand_result = None
 
@@ -416,12 +466,20 @@ def main():
         cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         while True:
-            frame_index += 1
-            capture_start = time.perf_counter()
-            ret, frame = cap.read()
-            capture_ms = update_ema(capture_ms, (time.perf_counter() - capture_start) * 1000.0)
-            if not ret:
+            frame, frame_id, frame_time, read_ms, capture_failed = frame_reader.latest()
+            capture_ms = read_ms
+            if capture_failed and frame is None:
                 break
+            if frame is None or frame_id == last_frame_id:
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                time.sleep(0.001)
+                continue
+
+            last_frame_id = frame_id
+            frame_index += 1
+            frame_age_ms = update_ema(frame_age_ms, (time.time() - frame_time) * 1000.0)
 
             now = time.time()
             fps = 1.0 / (now - fps_time + 1e-6)
@@ -545,10 +603,12 @@ def main():
 
             if args.profile:
                 overlay_items.extend([
-                    (f"采集:{capture_ms:.1f}ms  Pose:{pose_ms:.1f}ms  Hand:{hand_ms:.1f}ms",
+                    (f"采集:{capture_ms:.1f}ms  延迟:{frame_age_ms:.1f}ms",
                      (30, 230), font_mid, (255, 255, 0)),
-                    (f"RKNN:{rknn_ms:.1f}ms  绘制:{draw_ms:.1f}ms",
+                    (f"Pose:{pose_ms:.1f}ms  Hand:{hand_ms:.1f}ms",
                      (30, 275), font_mid, (255, 255, 0)),
+                    (f"RKNN:{rknn_ms:.1f}ms  绘制:{draw_ms:.1f}ms",
+                     (30, 320), font_mid, (255, 255, 0)),
                 ])
 
             frame = draw_chinese_items(frame, overlay_items)
@@ -569,6 +629,7 @@ def main():
             if key == ord("q"):
                 break
 
+    frame_reader.stop()
     cap.release()
     cv2.destroyAllWindows()
     rknn.release()

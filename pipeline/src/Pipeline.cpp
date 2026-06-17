@@ -2,6 +2,7 @@
 
 #include "pipeline/inc/CameraCapture.hpp"
 #include "pipeline/inc/RgaProcessor.hpp"
+#include "pipeline/inc/TcnRecognizer.hpp"
 
 #include <algorithm>
 #include <iomanip>
@@ -96,6 +97,28 @@ std::string makeMockMedicalText(int frame_id)
     return texts[(frame_id / 45) % texts.size()];
 }
 
+std::vector<float> makeMockTcnSequence(int frame_id)
+{
+    constexpr int sequence_length = 30;
+    constexpr int feature_dim = 258;
+    std::vector<float> sequence(sequence_length * feature_dim, 0.0F);
+
+    // 只用于打通 C++ RKNN 调用路径。真实接入时应替换为 Pose + Hand 关键点序列。
+    for (int t = 0; t < sequence_length; ++t) {
+        const float phase = static_cast<float>((frame_id + t) % 30) / 30.0F;
+        sequence[t * feature_dim + 11 * 4 + 0] = -0.5F;
+        sequence[t * feature_dim + 11 * 4 + 1] = 0.0F;
+        sequence[t * feature_dim + 12 * 4 + 0] = 0.5F;
+        sequence[t * feature_dim + 12 * 4 + 1] = 0.0F;
+        sequence[t * feature_dim + 132 + 0] = -0.2F + phase * 0.1F;
+        sequence[t * feature_dim + 132 + 1] = 0.4F;
+        sequence[t * feature_dim + 132 + 63 + 0] = 0.2F - phase * 0.1F;
+        sequence[t * feature_dim + 132 + 63 + 1] = 0.4F;
+    }
+
+    return sequence;
+}
+
 void drawStatusBar(cv::Mat& image, const std::string& text, double fps, long latency_ms)
 {
     const int bar_height = 86;
@@ -115,8 +138,15 @@ void drawStatusBar(cv::Mat& image, const std::string& text, double fps, long lat
 
 } // namespace
 
-SignLanguagePipeline::SignLanguagePipeline(int frame_count, std::string camera_device)
-    : frame_count_(frame_count), camera_device_(std::move(camera_device)), completed_frames_(0)
+SignLanguagePipeline::SignLanguagePipeline(int frame_count,
+                                           std::string camera_device,
+                                           std::string tcn_model_path,
+                                           std::string label_path)
+    : frame_count_(frame_count),
+      camera_device_(std::move(camera_device)),
+      tcn_model_path_(std::move(tcn_model_path)),
+      label_path_(std::move(label_path)),
+      completed_frames_(0)
 {
 }
 
@@ -291,6 +321,15 @@ void SignLanguagePipeline::keypointLoop()
 
 void SignLanguagePipeline::sequenceLoop()
 {
+    TcnRecognizer recognizer;
+    const bool recognizer_ready =
+        !tcn_model_path_.empty() && recognizer.load(tcn_model_path_, label_path_, 30, 258);
+    if (recognizer_ready) {
+        std::cout << "TCN recognizer enabled: " << tcn_model_path_ << '\n';
+    } else {
+        std::cout << "TCN recognizer disabled; sequenceLoop keeps using mock text.\n";
+    }
+
     while (true) {
         DetectionResult result = keypoint_queue_.pop();
         if (result.stop) {
@@ -301,9 +340,24 @@ void SignLanguagePipeline::sequenceLoop()
             return;
         }
 
-        simulateWork(4);
-        result.text_result = makeMockMedicalText(result.frame_id);
-        logStage("sequence", result.frame_id, "mock text -> " + result.text_result);
+        if (recognizer_ready) {
+            const TcnRecognitionResult tcn_result = recognizer.infer(makeMockTcnSequence(result.frame_id));
+            if (tcn_result.ok) {
+                std::ostringstream oss;
+                oss << tcn_result.label << " (" << std::fixed << std::setprecision(2)
+                    << tcn_result.confidence << ", " << std::setprecision(2)
+                    << tcn_result.latency_ms << " ms)";
+                result.text_result = oss.str();
+                logStage("sequence", result.frame_id, "TCN -> " + result.text_result);
+            } else {
+                result.text_result = makeMockMedicalText(result.frame_id);
+                logStage("sequence", result.frame_id, "TCN failed, fallback -> " + result.text_result);
+            }
+        } else {
+            simulateWork(4);
+            result.text_result = makeMockMedicalText(result.frame_id);
+            logStage("sequence", result.frame_id, "mock text -> " + result.text_result);
+        }
         result_queue_.push(std::move(result));
     }
 }

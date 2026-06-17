@@ -12,7 +12,10 @@
 // 端侧手语识别流水线骨架：每个 stage 独立运行在线程中，通过阻塞队列串联。
 class SignLanguagePipeline {
 public:
-    explicit SignLanguagePipeline(int frame_count, std::string camera_device = "/dev/video0");
+    explicit SignLanguagePipeline(int frame_count,
+                                  std::string camera_device = "/dev/video0",
+                                  std::string tcn_model_path = "",
+                                  std::string label_path = "label_map.json");
     ~SignLanguagePipeline();
 
     // 流水线拥有线程资源，不允许拷贝，避免多个对象重复 join 同一组线程。
@@ -36,6 +39,8 @@ private:
 
     int frame_count_;
     std::string camera_device_;
+    std::string tcn_model_path_;
+    std::string label_path_;
     std::atomic<int> completed_frames_;
     std::vector<std::thread> workers_;
 

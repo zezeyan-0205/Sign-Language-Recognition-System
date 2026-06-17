@@ -34,6 +34,20 @@ export DISPLAY=:0.0
 ./build/SignLanguagePipeline /dev/video21 300
 ```
 
+Run the C++ pipeline with the TCN RKNN recognizer enabled:
+
+```bash
+./build/SignLanguagePipeline \
+  /dev/video21 \
+  300 \
+  artifacts/models/sign_tcn_best.rknn \
+  label_map.json
+```
+
+The current C++ `sequenceLoop()` uses a mock `[1, 30, 258]` keypoint sequence
+only to verify the RKNN C API path. Replace that input with real Pose + Hand
+keypoints after the C++ keypoint stage is connected.
+
 Convert GRU ONNX to RKNN:
 
 ```bash

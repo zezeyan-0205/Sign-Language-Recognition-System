@@ -254,6 +254,37 @@ TCN RKNN：不是主要瓶颈
 
 当前结论：实时帧率瓶颈主要来自 MediaPipe Pose / Hand 和摄像头采集，TCN RKNN 本身占用很低。因此现阶段继续以 `full` 258 维 TCN 作为主线，`upper_body_hands_xy` 等降维特征作为后续消融实验保留。
 
+### 9. C++ TCN RKNN 推理模块接入
+
+新增 C++ 端 TCN RKNN 推理封装：
+
+```text
+pipeline/inc/TcnRecognizer.hpp
+pipeline/src/TcnRecognizer.cpp
+```
+
+该模块使用 RKNN C API 加载 `.rknn` 模型，输入固定为：
+
+```text
+float32 [1, 30, 258]
+```
+
+并读取 `label_map.json`，输出 top1 标签、置信度和单次 RKNN 推理延迟。
+
+当前 C++ pipeline 已支持通过命令行传入 TCN 模型和标签文件：
+
+```bash
+./build/SignLanguagePipeline \
+  /dev/video21 \
+  300 \
+  artifacts/models/sign_tcn_best.rknn \
+  label_map.json
+```
+
+当前阶段 `sequenceLoop()` 中的 TCN 输入仍是 mock 258 维序列，只用于打通 C++ RKNN API 调用路径。后续需要在 C++ 端接入真实 Pose + Hand 关键点后，将 mock 序列替换为真实 30 帧关键点缓存。
+
+板端已完成运行验证，说明 C++ 到 RKNN C API 再到 TCN 模型推理的调用链路已经打通。
+
 ## 当前流水线状态
 
 当前 pipeline 已具备完整的线程和队列传递结构：
@@ -361,7 +392,7 @@ v4l2-ctl --list-devices
 2. 如果出现 `Not active sensor` 或 `check rkisp_mainpath link or isp input`，优先检查 MIPI 排线、摄像头型号、设备树和系统镜像。
 3. 当前 `RawFrame::data` 会把 mmap buffer 内容复制到 `std::vector`，并且 RGA 输入前会临时拼接连续 NV12 缓冲，这有利于先验证功能，但不是最终高性能零拷贝方案。
 4. 当前实时显示依赖桌面环境和 `DISPLAY`，纯 SSH 无显示权限时需要先配置 X11/桌面权限。
-5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，但尚未接入 C++ pipeline。
+5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，并新增 C++ RKNN 推理封装；C++ 端 RKNN 调用链路已跑通，真实关键点输入尚未接入。
 6. Python 实时链路的主要瓶颈是 MediaPipe Pose / Hand，当前通过分频执行和低/中分辨率采集缓解。
 7. 当前还没有接入 YOLO、Hand21 和 C++ 端真实时序模型调用。
 
@@ -371,13 +402,13 @@ v4l2-ctl --list-devices
 2. 将 `handDetectLoop()` 的 mock 逻辑替换为 YOLO RKNN 手部检测模型，先跑单帧检测。
 3. 将 `keypointLoop()` 的 mock 逻辑替换为 Hand21 关键点提取，形成手部拓扑特征。
 4. 将 `sequenceLoop()` 的 mock 文本替换为 TCN/RKNN 时序模型和状态机文本拼接逻辑。
-5. 在 C++ 端接入 TCN RKNN 推理接口，完成关键点序列输入到识别文本输出的真实闭环。
+5. 将 C++ `sequenceLoop()` 中的 mock 258 维序列替换为真实 Pose + Hand 关键点缓存，完成关键点序列输入到识别文本输出的真实闭环。
 6. 评估用 YOLO/Hand21 RKNN 替换 MediaPipe 的可行性，逐步减少 Python MediaPipe 对实时帧率的限制。
 7. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
 
 ## 当前阶段结论
 
-当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证 + Python RKNN 实时摄像头 Demo”阶段。摄像头采集、RGA 图像转换、端到端显示闭环、关键点时序模型 RKNN 部署和 Python 实时识别均已实测成立，后续可以围绕 YOLO 手部检测、Hand21 关键点提取和 C++ 端 TCN RKNN 推理继续扩展。
+当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证 + Python RKNN 实时摄像头 Demo + C++ TCN RKNN 调用链路”阶段。摄像头采集、RGA 图像转换、端到端显示闭环、关键点时序模型 RKNN 部署、Python 实时识别和 C++ RKNN 调用链路均已实测成立，后续可以围绕 YOLO 手部检测、Hand21 关键点提取和 C++ 端真实关键点输入继续扩展。
 
 当前阶段已提交：
 
