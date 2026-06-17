@@ -11,7 +11,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.sequence_models import INPUT_SIZE, SEQ_LEN, TCNClassifier
+from scripts.common.keypoint_features import (
+    FEATURE_MODE_FULL,
+    FEATURE_MODES,
+    SEQ_LEN,
+    get_feature_dim,
+)
+from scripts.common.sequence_models import TCNClassifier
 
 
 def parse_args():
@@ -22,6 +28,7 @@ def parse_args():
     parser.add_argument("--channels", default="128,128,128")
     parser.add_argument("--kernel-size", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--feature-mode", choices=FEATURE_MODES, default=FEATURE_MODE_FULL)
     parser.add_argument("--opset", type=int, default=13)
     return parser.parse_args()
 
@@ -72,9 +79,10 @@ def main():
     args = parse_args()
     labels = load_labels(args.labels)
     channels = parse_channels(args.channels)
+    input_size = get_feature_dim(args.feature_mode)
 
     model = TCNClassifier(
-        input_size=INPUT_SIZE,
+        input_size=input_size,
         num_classes=len(labels),
         channels=channels,
         kernel_size=args.kernel_size,
@@ -86,7 +94,7 @@ def main():
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    example_input = torch.randn(1, SEQ_LEN, INPUT_SIZE, dtype=torch.float32)
+    example_input = torch.randn(1, SEQ_LEN, input_size, dtype=torch.float32)
 
     with torch.no_grad():
         torch.onnx.export(
@@ -107,7 +115,8 @@ def main():
     verify_with_onnxruntime(output_path, model, example_input)
 
     print(f"Exported: {output_path}")
-    print(f"Input:  keypoints float32 [1, {SEQ_LEN}, {INPUT_SIZE}]")
+    print(f"Feature mode: {args.feature_mode}")
+    print(f"Input:  keypoints float32 [1, {SEQ_LEN}, {input_size}]")
     print(f"Output: logits float32 [1, {len(labels)}]")
     print(f"Labels: {labels}")
 

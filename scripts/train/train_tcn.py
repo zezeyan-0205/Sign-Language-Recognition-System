@@ -16,11 +16,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.sequence_models import INPUT_SIZE, SEQ_LEN, TCNClassifier
-
-
-POSE_DIM = 33 * 4
-HAND_DIM = 21 * 3
+from scripts.common.keypoint_features import (
+    FEATURE_MODE_FULL,
+    FEATURE_MODES,
+    SEQ_LEN,
+    get_feature_dim,
+    prepare_sequence_file,
+)
+from scripts.common.sequence_models import TCNClassifier
 
 
 def parse_args():
@@ -38,6 +41,7 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--channels", default="128,128,128")
     parser.add_argument("--kernel-size", type=int, default=3)
+    parser.add_argument("--feature-mode", choices=FEATURE_MODES, default=FEATURE_MODE_FULL)
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
@@ -57,67 +61,17 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def normalize_keypoints(data):
-    data = data.copy().astype(np.float32)
-
-    for frame in data:
-        pose = frame[:POSE_DIM].reshape(33, 4)
-        left_shoulder = pose[11, :3]
-        right_shoulder = pose[12, :3]
-
-        if np.all(left_shoulder == 0) or np.all(right_shoulder == 0):
-            continue
-
-        center = (left_shoulder + right_shoulder) / 2.0
-        shoulder_width = np.linalg.norm(left_shoulder[:2] - right_shoulder[:2])
-        if shoulder_width < 1e-6:
-            continue
-
-        pose[:, :3] = (pose[:, :3] - center) / shoulder_width
-        frame[:POSE_DIM] = pose.reshape(-1)
-
-        left_start = POSE_DIM
-        right_start = POSE_DIM + HAND_DIM
-        left_hand = frame[left_start:right_start].reshape(21, 3)
-        right_hand = frame[right_start:right_start + HAND_DIM].reshape(21, 3)
-
-        if not np.all(left_hand == 0):
-            frame[left_start:right_start] = (
-                (left_hand - center) / shoulder_width
-            ).reshape(-1)
-
-        if not np.all(right_hand == 0):
-            frame[right_start:right_start + HAND_DIM] = (
-                (right_hand - center) / shoulder_width
-            ).reshape(-1)
-
-    return data
-
-
-def prepare_sequence(path):
-    data = np.load(path).astype(np.float32)
-    if data.ndim != 2 or data.shape[1] != INPUT_SIZE:
-        raise ValueError(f"Expected (N, {INPUT_SIZE}), got {data.shape} from {path}")
-
-    if data.shape[0] > SEQ_LEN:
-        data = data[:SEQ_LEN]
-    elif data.shape[0] < SEQ_LEN:
-        padding = np.zeros((SEQ_LEN - data.shape[0], INPUT_SIZE), dtype=np.float32)
-        data = np.concatenate((data, padding), axis=0)
-
-    return normalize_keypoints(data)
-
-
 class SignDataset(Dataset):
-    def __init__(self, samples, labels):
+    def __init__(self, samples, labels, feature_mode):
         self.samples = samples
         self.labels = labels
+        self.feature_mode = feature_mode
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, index):
-        data = prepare_sequence(self.samples[index])
+        data = prepare_sequence_file(self.samples[index], self.feature_mode, SEQ_LEN)
         label = self.labels[index]
         return torch.tensor(data, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
 
@@ -176,11 +130,14 @@ def evaluate(model, loader, device, classes):
 def main():
     args = parse_args()
     channels = parse_channels(args.channels)
+    input_size = get_feature_dim(args.feature_mode)
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("使用设备:", device)
     print("TCN channels:", channels)
+    print("Feature mode:", args.feature_mode)
+    print("Input size:", input_size)
 
     samples, labels, classes = load_dataset(args.dataset)
     print("类别:", classes)
@@ -200,20 +157,20 @@ def main():
     )
 
     train_loader = DataLoader(
-        SignDataset(train_samples, train_labels),
+        SignDataset(train_samples, train_labels, args.feature_mode),
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=False,
     )
     val_loader = DataLoader(
-        SignDataset(val_samples, val_labels),
+        SignDataset(val_samples, val_labels, args.feature_mode),
         batch_size=args.batch_size,
         shuffle=False,
         drop_last=False,
     )
 
     model = TCNClassifier(
-        input_size=INPUT_SIZE,
+        input_size=input_size,
         num_classes=len(classes),
         channels=channels,
         kernel_size=args.kernel_size,

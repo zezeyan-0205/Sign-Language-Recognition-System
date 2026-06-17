@@ -1,4 +1,6 @@
+import argparse
 import os
+import sys
 import time
 import json
 import cv2
@@ -8,6 +10,17 @@ import mediapipe as mp
 from collections import deque, Counter
 from PIL import Image, ImageDraw, ImageFont
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from scripts.common.keypoint_features import (
+    FEATURE_MODE_FULL,
+    FEATURE_MODES,
+    get_feature_dim,
+    prepare_sequence_array,
+)
+
 
 # ================= 配置 =================
 SEQ_LEN = 30
@@ -15,7 +28,7 @@ WINDOW_SEC = 1.5          # 与采集脚本的 --record_sec 保持一致
 PREDICT_INTERVAL = 0.10   # 每隔多少秒预测一次，避免每帧都跑模型导致卡顿
 INPUT_SIZE = 258
 MIN_HAND_ACTIVE_FRAMES = 8
-MODEL_PATH = "sign_gru_best.onnx"
+MODEL_PATH = "artifacts/models/sign_tcn_best.onnx"
 LABEL_MAP_PATH = "label_map.json"
 
 POSE_MODEL = "models/pose_landmarker.task"
@@ -43,6 +56,17 @@ PoseLandmarker = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run realtime ONNX sign recognition from a camera."
+    )
+    parser.add_argument("--model", default=MODEL_PATH, help="ONNX model path.")
+    parser.add_argument("--labels", default=LABEL_MAP_PATH, help="Label map JSON path.")
+    parser.add_argument("--feature-mode", choices=FEATURE_MODES, default=FEATURE_MODE_FULL)
+    parser.add_argument("--camera", type=int, default=CAMERA_ID, help="OpenCV camera id.")
+    return parser.parse_args()
 
 
 def softmax(logits):
@@ -275,21 +299,23 @@ def draw_roi(frame):
 
 
 def main():
+    args = parse_args()
+    input_size = get_feature_dim(args.feature_mode)
     font_big = load_chinese_font(42)
     font_mid = load_chinese_font(30)
 
-    with open(LABEL_MAP_PATH, "r", encoding="utf-8") as f:
+    with open(args.labels, "r", encoding="utf-8") as f:
         labels = json.load(f)
 
     print("类别:", labels)
 
     session = ort.InferenceSession(
-        MODEL_PATH,
+        args.model,
         providers=["CPUExecutionProvider"],
     )
     input_info = session.get_inputs()[0]
     output_info = session.get_outputs()[0]
-    expected_input_shape = [1, SEQ_LEN, INPUT_SIZE]
+    expected_input_shape = [1, SEQ_LEN, input_size]
     if input_info.shape != expected_input_shape:
         raise ValueError(
             f"ONNX输入形状不匹配: 实际为 {input_info.shape}, "
@@ -301,6 +327,7 @@ def main():
             f"期望为 {[1, len(labels)]}"
         )
     print("推理后端: ONNX Runtime CPU")
+    print(f"特征模式: {args.feature_mode}")
     print(f"模型输入: {input_info.name} {input_info.shape}")
     print(f"模型输出: {output_info.name} {output_info.shape}")
 
@@ -316,7 +343,7 @@ def main():
         num_hands=2,
     )
 
-    cap = cv2.VideoCapture(CAMERA_ID)
+    cap = cv2.VideoCapture(args.camera)
 
     if not cap.isOpened():
         print("摄像头打开失败，可以把 CAMERA_ID 改成 1")
@@ -415,7 +442,7 @@ def main():
                     display_conf = 0.0
                 else:
                     x = resample_sequence(raw_seq, SEQ_LEN)
-                    x = normalize_keypoints(x)
+                    x = prepare_sequence_array(x, args.feature_mode, SEQ_LEN)
                     x = np.expand_dims(x, axis=0).astype(np.float32)
 
                     logits = session.run(

@@ -7,7 +7,6 @@ from rknn.api import RKNN
 
 
 INPUT_NAME = "keypoints"
-INPUT_SIZE_LIST = [[1, 30, 258]]
 
 
 def parse_args():
@@ -16,6 +15,7 @@ def parse_args():
     )
     parser.add_argument("--onnx", default="artifacts/models/sign_tcn_best.onnx")
     parser.add_argument("--output", default="artifacts/models/sign_tcn_best.rknn")
+    parser.add_argument("--input-size", type=int, default=258)
     parser.add_argument("--target", default="rk3588")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -53,7 +53,8 @@ def main():
     print(f"Target: {args.target}")
     print(f"Toolkit2: {toolkit_version}")
     print(f"ONNX package: {onnx.__version__}")
-    print(f"Input:  {INPUT_NAME} float32 {INPUT_SIZE_LIST[0]}")
+    input_size_list = [[1, 30, args.input_size]]
+    print(f"Input:  {INPUT_NAME} float32 {input_size_list[0]}")
     print("Mode:   non-quantized")
 
     rknn = RKNN(verbose=args.verbose)
@@ -66,7 +67,7 @@ def main():
         ret = rknn.load_onnx(
             model=str(onnx_path),
             inputs=[INPUT_NAME],
-            input_size_list=INPUT_SIZE_LIST,
+            input_size_list=input_size_list,
         )
         require_success(ret, "load_onnx")
 

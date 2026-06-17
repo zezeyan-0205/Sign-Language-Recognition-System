@@ -200,6 +200,60 @@ Mismatches：0
 
 当前结论：GRU 保留为 PC/ONNX 对照基线，板端 RKNN 部署主路线切换为 TCN。
 
+### 8. Python RKNN 实时摄像头验证与性能调优
+
+新增 Python 端 RKNN 实时摄像头测试脚本：
+
+```text
+scripts/infer/infer_realtime_rknn.py
+```
+
+该脚本复用 ONNX 实时脚本中的 MediaPipe Pose / Hand 关键点提取、关键点归一化、30 帧时间窗口和投票平滑逻辑，只将时序分类后端替换为 TCN RKNN：
+
+```text
+摄像头帧
+    -> MediaPipe Pose + Hand
+    -> 258 维关键点序列
+    -> TCN RKNN
+    -> 文本显示
+```
+
+当前实时脚本已支持：
+
+- 全屏窗口显示。
+- 采集分辨率和显示分辨率分离。
+- Pose / Hand 分频执行，降低 MediaPipe 压力。
+- 分段 profiler，显示采集、Pose、Hand、RKNN 和绘制耗时。
+- `full`、`upper_body_hands_xy`、`hands_xy` 三种特征模式实验。
+
+当前板端可接受的实时 Demo 参数为：
+
+```bash
+python3 scripts/infer/infer_realtime_rknn.py \
+  --model artifacts/models/sign_tcn_best.rknn \
+  --labels label_map.json \
+  --camera 21 \
+  --width 1280 \
+  --height 720 \
+  --display-width 1920 \
+  --display-height 1080 \
+  --pose-interval 8 \
+  --hand-interval 4 \
+  --profile
+```
+
+板端 profiler 观察到的主要耗时大致为：
+
+```text
+采集：约 30 ms
+Pose：约 40 ms
+Hand：约 70 ms
+绘制：约 15 ms
+TCN RKNN：不是主要瓶颈
+```
+
+当前结论：实时帧率瓶颈主要来自 MediaPipe Pose / Hand 和摄像头采集，TCN RKNN 本身占用很低。因此现阶段继续以 `full` 258 维 TCN 作为主线，`upper_body_hands_xy` 等降维特征作为后续消融实验保留。
+
 ## 当前流水线状态
 
 当前 pipeline 已具备完整的线程和队列传递结构：
@@ -230,6 +284,8 @@ outputLoop
 ## 当前程序行为
 
 程序现在会读取摄像头帧，通过 RGA 生成 `BGR888 640x640` 的 `cv::Mat`，并在 MIPI 屏桌面上实时显示 mock 可视化结果。
+
+Python 实时 RKNN Demo 当前可以直接从 USB 摄像头读取画面，调用 MediaPipe 提取关键点，并通过 TCN RKNN 在板端 NPU 上输出识别文本。
 
 程序第一次成功完成 RGA 转换时会生成：
 
@@ -306,7 +362,8 @@ v4l2-ctl --list-devices
 3. 当前 `RawFrame::data` 会把 mmap buffer 内容复制到 `std::vector`，并且 RGA 输入前会临时拼接连续 NV12 缓冲，这有利于先验证功能，但不是最终高性能零拷贝方案。
 4. 当前实时显示依赖桌面环境和 `DISPLAY`，纯 SSH 无显示权限时需要先配置 X11/桌面权限。
 5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，但尚未接入 C++ pipeline。
-6. 当前还没有接入 YOLO、Hand21 和 C++ 端真实时序模型调用。
+6. Python 实时链路的主要瓶颈是 MediaPipe Pose / Hand，当前通过分频执行和低/中分辨率采集缓解。
+7. 当前还没有接入 YOLO、Hand21 和 C++ 端真实时序模型调用。
 
 ## 下一步建议
 
@@ -315,11 +372,12 @@ v4l2-ctl --list-devices
 3. 将 `keypointLoop()` 的 mock 逻辑替换为 Hand21 关键点提取，形成手部拓扑特征。
 4. 将 `sequenceLoop()` 的 mock 文本替换为 TCN/RKNN 时序模型和状态机文本拼接逻辑。
 5. 在 C++ 端接入 TCN RKNN 推理接口，完成关键点序列输入到识别文本输出的真实闭环。
-6. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
+6. 评估用 YOLO/Hand21 RKNN 替换 MediaPipe 的可行性，逐步减少 Python MediaPipe 对实时帧率的限制。
+7. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
 
 ## 当前阶段结论
 
-当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证”阶段。摄像头采集、RGA 图像转换、端到端显示闭环和关键点时序模型 RKNN 部署均已实测成立，后续可以围绕 YOLO 手部检测、Hand21 关键点提取和 C++ 端 TCN RKNN 推理继续扩展。
+当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证 + Python RKNN 实时摄像头 Demo”阶段。摄像头采集、RGA 图像转换、端到端显示闭环、关键点时序模型 RKNN 部署和 Python 实时识别均已实测成立，后续可以围绕 YOLO 手部检测、Hand21 关键点提取和 C++ 端 TCN RKNN 推理继续扩展。
 
 当前阶段已提交：
 

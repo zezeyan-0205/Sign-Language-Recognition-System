@@ -2,16 +2,25 @@ import argparse
 from collections import Counter
 import csv
 import json
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-SEQ_LEN = 30
-INPUT_SIZE = 258
-POSE_DIM = 33 * 4
-HAND_DIM = 21 * 3
+from scripts.common.keypoint_features import (
+    FEATURE_MODE_FULL,
+    FEATURE_MODES,
+    SEQ_LEN,
+    get_feature_dim,
+    prepare_sequence_file,
+)
+
+RAW_FEATURE_DIM = 258
 
 
 def parse_args():
@@ -24,6 +33,7 @@ def parse_args():
     parser.add_argument("--model", help="Model path for the selected backend.")
     parser.add_argument("--output", help="Write per-sample results to JSON.")
     parser.add_argument("--csv-output", help="Optional CSV summary output.")
+    parser.add_argument("--feature-mode", choices=FEATURE_MODES, default=FEATURE_MODE_FULL)
     parser.add_argument("--limit-per-class", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument(
@@ -44,56 +54,8 @@ def load_labels(path):
     return labels
 
 
-def normalize_keypoints(data):
-    data = data.copy().astype(np.float32)
-
-    for frame in data:
-        pose = frame[:POSE_DIM].reshape(33, 4)
-        left_shoulder = pose[11, :3]
-        right_shoulder = pose[12, :3]
-
-        if np.all(left_shoulder == 0) or np.all(right_shoulder == 0):
-            continue
-
-        center = (left_shoulder + right_shoulder) / 2.0
-        shoulder_width = np.linalg.norm(left_shoulder[:2] - right_shoulder[:2])
-        if shoulder_width < 1e-6:
-            continue
-
-        pose[:, :3] = (pose[:, :3] - center) / shoulder_width
-        frame[:POSE_DIM] = pose.reshape(-1)
-
-        left_start = POSE_DIM
-        right_start = POSE_DIM + HAND_DIM
-        left_hand = frame[left_start:right_start].reshape(21, 3)
-        right_hand = frame[right_start:right_start + HAND_DIM].reshape(21, 3)
-
-        if not np.all(left_hand == 0):
-            frame[left_start:right_start] = ((left_hand - center) / shoulder_width).reshape(-1)
-
-        if not np.all(right_hand == 0):
-            frame[right_start:right_start + HAND_DIM] = ((right_hand - center) / shoulder_width).reshape(-1)
-
-    return data
-
-
-def prepare_input(path):
-    data = np.load(path).astype(np.float32)
-    if data.ndim == 3:
-        if data.shape[0] != 1:
-            raise ValueError(f"Only batch=1 is supported, got {data.shape} from {path}")
-        data = data[0]
-
-    if data.ndim != 2 or data.shape[1] != INPUT_SIZE:
-        raise ValueError(f"Expected (N, {INPUT_SIZE}), got {data.shape} from {path}")
-
-    if data.shape[0] > SEQ_LEN:
-        data = data[:SEQ_LEN]
-    elif data.shape[0] < SEQ_LEN:
-        padding = np.zeros((SEQ_LEN - data.shape[0], INPUT_SIZE), dtype=np.float32)
-        data = np.concatenate((data, padding), axis=0)
-
-    data = normalize_keypoints(data)
+def prepare_input(path, feature_mode):
+    data = prepare_sequence_file(path, feature_mode, SEQ_LEN)
     return np.ascontiguousarray(data[None, ...])
 
 
@@ -134,7 +96,7 @@ class OnnxRunner:
 
 
 class RknnRunner:
-    def __init__(self, model_path, warmup, pass_through):
+    def __init__(self, model_path, warmup, pass_through, input_size):
         from rknnlite.api import RKNNLite
 
         print(f"Loading RKNN model: {model_path}", flush=True)
@@ -151,7 +113,7 @@ class RknnRunner:
         if ret != 0:
             raise RuntimeError(f"init_runtime failed: {ret}")
 
-        dummy = np.zeros((1, SEQ_LEN, INPUT_SIZE), dtype=np.float32)
+        dummy = np.zeros((1, SEQ_LEN, input_size), dtype=np.float32)
         for index in range(warmup):
             print(f"Warmup {index + 1}/{warmup}...", flush=True)
             self.run(dummy)
@@ -170,25 +132,28 @@ class RknnRunner:
         self.rknn.release()
 
 
-def make_runner(backend, model_path, warmup, pass_through):
+def make_runner(backend, model_path, warmup, pass_through, input_size):
     if backend == "onnx":
         return OnnxRunner(model_path)
     if backend == "rknn":
-        return RknnRunner(model_path, warmup, pass_through)
+        return RknnRunner(model_path, warmup, pass_through, input_size)
     raise ValueError(f"Unsupported backend: {backend}")
 
 
 def evaluate(args):
     labels = load_labels(args.labels)
     samples = collect_samples(args.dataset, labels, args.limit_per_class)
-    runner = make_runner(args.backend, Path(args.model), args.warmup, args.pass_through)
+    input_size = get_feature_dim(args.feature_mode)
+    print(f"Feature mode: {args.feature_mode}")
+    print(f"Input size: {input_size}")
+    runner = make_runner(args.backend, Path(args.model), args.warmup, args.pass_through, input_size)
 
     results = []
     correct = 0
     latencies = []
     try:
         for index, (path, expected_label, expected_index) in enumerate(samples, start=1):
-            input_data = prepare_input(path)
+            input_data = prepare_input(path, args.feature_mode)
             print(f"Running sample {index}/{len(samples)}: {path}", flush=True)
             start = time.perf_counter()
             logits = runner.run(input_data)
@@ -224,6 +189,8 @@ def evaluate(args):
         "model": args.model,
         "dataset": args.dataset,
         "labels": labels,
+        "feature_mode": args.feature_mode,
+        "input_size": input_size,
         "sample_count": len(samples),
         "accuracy": accuracy,
         "latency_ms": {
