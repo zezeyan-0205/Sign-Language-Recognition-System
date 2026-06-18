@@ -206,6 +206,33 @@ python3 scripts/infer/infer_realtime_rknn.py \
   --profile
 ```
 
+Run the Python RKNN worker without an OpenCV window for the Qt frontend:
+
+```bash
+python3 scripts/infer/infer_realtime_rknn.py \
+  --model artifacts/models/sign_tcn_best.rknn \
+  --labels label_map.json \
+  --camera 21 \
+  --width 1280 \
+  --height 720 \
+  --pose-interval 8 \
+  --hand-interval 4 \
+  --no-window
+```
+
+Build and run the Qt frontend on the board:
+
+```bash
+cmake -S . -B build
+cmake --build build -j4
+export DISPLAY=:0.0
+./build/qt_app/SignLanguageQt
+```
+
+`SignLanguageQt` starts the Python worker with `QProcess` and reads JSON Lines
+from stdout. The C++ MediaPipe demo path is currently optional; the Qt frontend
+uses the validated Python MediaPipe + RKNN pipeline.
+
 For the upper-body + hand-xy model, use the matching feature mode:
 
 ```bash

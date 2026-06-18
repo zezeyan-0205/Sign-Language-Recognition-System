@@ -1,16 +1,16 @@
 # RK3588 手语交互系统当前进度记录
 
-日期：2026-06-17
+日期：2026-06-18
 
 ## 项目背景
 
 项目目标是基于 RK3588 开发医院门诊无障碍双向手语交互系统。当前阶段聚焦在第一条基础数据链路：
 
 ```text
-摄像头输入 -> V4L2 采集 -> RGA 预处理 -> Mock 算法接口 -> MIPI 屏实时显示 -> TCN/RKNN 时序识别接入
+摄像头输入 -> Python MediaPipe 关键点 -> TCN RKNN 时序识别 -> Qt 交互界面
 ```
 
-现阶段已经完成板端摄像头采集、RGA 图像预处理、Mock 算法接口、屏幕显示闭环，以及关键点时序模型从 GRU 到 TCN 的 RKNN 部署验证。当前主线调整为继续使用 MediaPipe Pose + Hand 提取关键点，并逐步迁移到 C++ 端接入。
+现阶段已经完成板端摄像头采集、RGA 图像预处理、Mock 算法接口、屏幕显示闭环，以及关键点时序模型从 GRU 到 TCN 的 RKNN 部署验证。经过 C++ MediaPipe 编译和集成尝试后，当前主线调整为：Python 负责 MediaPipe Pose + Hand 关键点提取和 TCN RKNN 推理，C++/Qt 负责上层交互界面。
 
 ## 已完成工作
 
@@ -354,6 +354,46 @@ BGR cv::Mat
 
 如果当前构建没有启用 C++ MediaPipe 支持，extractor 会保持 disabled，pipeline 自动回退到 mock 258 维特征，保证 V4L2/RGA/TCN RKNN 演示仍然可以运行。下一步需要在板端确认 MediaPipe C++ / MediaPipe Tasks 的编译和链接方式，再补齐 extractor 内部真实实现。
 
+### 13. Python RKNN Worker 与 Qt 前端验证
+
+在 C++ MediaPipe 集成过程中，已经验证 MediaPipe C++ smoke test 能分别跑通 Hand、Pose 和组合 258 维特征输出，但将 Bazel 产物作为动态库接入当前 CMake pipeline 时，遇到 protobuf descriptor 初始化阶段段错误。为保证项目 Demo 进度，当前暂时不继续强推 C++ MediaPipe 主线，改为 Python + Qt 混合架构。
+
+当前稳定主线为：
+
+```text
+USB 摄像头
+    -> Python OpenCV 读帧
+    -> MediaPipe Pose + Hand
+    -> 258 维关键点序列
+    -> TCN RKNN
+    -> JSON Lines
+    -> Qt 前端 QProcess 读取并显示
+```
+
+`scripts/infer/infer_realtime_rknn.py` 已新增 worker 模式：
+
+- `--json-output`：向 stdout 输出 JSON Lines，供 Qt/QProcess 读取。
+- `--no-window`：关闭 OpenCV 预览窗口，作为后台识别进程运行。
+- `--json-interval`：控制状态输出频率。
+
+新增 Qt Widgets 前端：
+
+```text
+qt_app/CMakeLists.txt
+qt_app/main.cpp
+qt_app/MainWindow.hpp
+qt_app/MainWindow.cpp
+```
+
+Qt 前端当前支持：
+
+- 启动和停止 Python RKNN worker。
+- 逐行读取 stdout，并解析 JSON Lines。
+- 显示识别文本、置信度、FPS、窗口帧数、关键阶段延迟和运行状态。
+- 通过 UI 配置模型路径、标签路径、摄像头编号、分辨率和 Pose/Hand 分频参数。
+
+板端已经完成验证：Python RKNN worker 可运行，Qt 前端可启动 worker 并显示识别结果。当前项目演示主线正式切换为 Python MediaPipe/RKNN + C++ Qt UI。
+
 ## 当前流水线状态
 
 当前 pipeline 已具备完整的线程和队列传递结构：
@@ -385,7 +425,7 @@ outputLoop
 
 程序现在会读取摄像头帧，通过 RGA 生成 `BGR888 640x640` 的 `cv::Mat`，并在 MIPI 屏桌面上实时显示 mock 可视化结果。
 
-Python 实时 RKNN Demo 当前可以直接从 USB 摄像头读取画面，调用 MediaPipe 提取关键点，并通过 TCN RKNN 在板端 NPU 上输出识别文本。
+Python 实时 RKNN Demo 当前可以直接从 USB 摄像头读取画面，调用 MediaPipe 提取关键点，并通过 TCN RKNN 在板端 NPU 上输出识别文本。Qt 前端已经可以通过 `QProcess` 启动该 Python worker，并实时读取 JSON Lines 更新界面。
 
 程序第一次成功完成 RGA 转换时会生成：
 
@@ -455,28 +495,51 @@ v4l2-ctl --list-devices
 
 其中 `/dev/videoX` 替换成实际 UVC 摄像头节点。
 
+运行 Python RKNN worker 无窗口模式：
+
+```bash
+python3 scripts/infer/infer_realtime_rknn.py \
+  --model artifacts/models/sign_tcn_best.rknn \
+  --labels label_map.json \
+  --camera 21 \
+  --width 1280 \
+  --height 720 \
+  --pose-interval 8 \
+  --hand-interval 4 \
+  --no-window
+```
+
+运行 Qt 前端：
+
+```bash
+cmake -S . -B build
+cmake --build build -j4
+export DISPLAY=:0.0
+./build/qt_app/SignLanguageQt
+```
+
 ## 当前风险和注意事项
 
 1. MIPI 摄像头不能只看 `/dev/video11` 是否存在，还要确认 sensor 是否真正挂到 media pipeline。
 2. 如果出现 `Not active sensor` 或 `check rkisp_mainpath link or isp input`，优先检查 MIPI 排线、摄像头型号、设备树和系统镜像。
 3. 当前 `RawFrame::data` 会把 mmap buffer 内容复制到 `std::vector`，并且 RGA 输入前会临时拼接连续 NV12 缓冲，这有利于先验证功能，但不是最终高性能零拷贝方案。
 4. 当前实时显示依赖桌面环境和 `DISPLAY`，纯 SSH 无显示权限时需要先配置 X11/桌面权限。
-5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，并新增 C++ RKNN 推理封装、关键点序列缓冲、关键点归一化和 MediaPipe 关键点接口；C++ 端 RKNN 调用链路已跑通，真实 MediaPipe 实现尚未补齐。
+5. TCN/RKNN 时序模型已经完成 Python 侧部署验证，并新增 C++ RKNN 推理封装、关键点序列缓冲、关键点归一化和 MediaPipe 关键点接口；C++ 端 RKNN 调用链路已跑通，C++ MediaPipe 作为备选探索保留。
 6. Python 实时链路的主要瓶颈是 MediaPipe Pose / Hand，当前通过分频执行和低/中分辨率采集缓解。
-7. 当前不优先接入 YOLO/Hand21，下一阶段重点是 C++ MediaPipe Pose + Hand 的真实关键点输入。
+7. 当前不优先接入 YOLO/Hand21，也不继续强推 C++ MediaPipe Demo；下一阶段重点是完善 Qt 交互界面和就诊业务流程。
 
 ## 下一步建议
 
-1. 把摄像头参数做成配置项，例如 width、height、format、frame_count。
-2. 在板端确认 C++ MediaPipe / MediaPipe Tasks 的可用构建方式和链接方式。
-3. 补齐 C++ `MediaPipeKeypointExtractor` 的真实实现，输入 `cv::Mat BGR`，输出 258 维 Pose + LeftHand + RightHand 原始特征。
-4. 在板端验证 `keypointLoop()` 能输出真实 C++ MediaPipe 关键点，完成关键点序列输入到识别文本输出的真实闭环。
-5. 将 `sequenceLoop()` 的识别文本接入状态机文本拼接逻辑，形成就诊关键词输出。
-6. 在真实模型链路跑通后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
+1. 完善 Qt 医院场景 UI，例如患者端识别文本、医生端常用问诊短句、确认/清空/播报按钮。
+2. 将 Python worker 输出从单词级结果扩展为状态机短句，例如“我 发烧”“昨天 头 疼痛”。
+3. 增加 Qt 与 Python worker 的异常提示，例如摄像头打开失败、模型缺失、MediaPipe 模型缺失。
+4. 根据实际演示效果继续调节 `pose-interval`、`hand-interval`、采集分辨率和显示布局。
+5. C++ MediaPipe 作为后续优化路线保留，只有在 Qt/Python Demo 稳定后再继续处理 protobuf/动态库冲突。
+6. 在真实交互链路跑稳后再评估 DMA-BUF / ION fd 零拷贝，减少 `RawFrame::data` 和连续 NV12 临时缓冲带来的 CPU 拷贝。
 
 ## 当前阶段结论
 
-当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证 + Python RKNN 实时摄像头 Demo + C++ TCN RKNN 调用链路 + C++ 关键点序列缓存与归一化 + C++ MediaPipe 关键点接口”阶段。摄像头采集、RGA 图像转换、端到端显示闭环、关键点时序模型 RKNN 部署、Python 实时识别和 C++ RKNN 调用链路均已实测成立，后续主线是补齐并验证 C++ MediaPipe Pose + Hand 真实关键点实现。
+当前项目已经从“空流水线 demo”推进到“板端 V4L2 摄像头采集 + RGA 硬件预处理 + Mock 算法接口 + MIPI 屏实时可视化 + TCN/RKNN 时序模型部署验证 + Python RKNN 实时摄像头 Demo + Qt 交互前端”阶段。摄像头采集、RGA 图像转换、端到端显示闭环、关键点时序模型 RKNN 部署、Python 实时识别和 Qt 前端通信均已实测成立，后续主线是完善 Python worker + Qt 的医院问诊交互 Demo。
 
 当前阶段已提交：
 
@@ -488,4 +551,10 @@ v4l2-ctl --list-devices
 
 ```text
 feat(pipeline): add mock visualization output
+```
+
+本次 Python/Qt 主线提交：
+
+```text
+feat(qt): add Python RKNN worker frontend
 ```

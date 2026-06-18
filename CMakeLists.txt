@@ -6,6 +6,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core highgui imgcodecs imgproc)
+find_package(Qt5 COMPONENTS Core Widgets QUIET)
 
 find_path(RKNN_INCLUDE_DIR rknn_api.h
     PATHS /usr/include /usr/include/rknn /usr/local/include
@@ -46,3 +47,12 @@ target_link_libraries(SignLanguagePipeline PRIVATE
     rga
     ${OpenCV_LIBS}
 )
+
+option(BUILD_QT_APP "Build the Qt frontend that drives the Python RKNN worker." ON)
+if(BUILD_QT_APP)
+    if(Qt5_FOUND)
+        add_subdirectory(qt_app)
+    else()
+        message(STATUS "Qt5 Core/Widgets not found; SignLanguageQt frontend will be skipped.")
+    endif()
+endif()

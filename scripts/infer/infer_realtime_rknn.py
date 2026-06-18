@@ -96,6 +96,22 @@ def parse_args():
         default=2,
         help="Run HandLandmarker every N frames and reuse the last hands between runs.",
     )
+    parser.add_argument(
+        "--json-output",
+        action="store_true",
+        help="Emit JSON Lines to stdout for a Qt/QProcess frontend.",
+    )
+    parser.add_argument(
+        "--no-window",
+        action="store_true",
+        help="Disable OpenCV preview window for headless worker mode.",
+    )
+    parser.add_argument(
+        "--json-interval",
+        type=float,
+        default=0.2,
+        help="Minimum seconds between JSON status messages.",
+    )
     return parser.parse_args()
 
 
@@ -195,6 +211,12 @@ def draw_chinese_items(frame, items):
     for text, pos, font, color in items:
         draw.text(pos, text, font=font, fill=color)
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
+
+def emit_json(event_type, **payload):
+    payload["type"] = event_type
+    payload["time"] = time.time()
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 # 绘制进度条：current/total 可以是帧数，也可以是秒数
@@ -377,6 +399,8 @@ def main():
     args = parse_args()
     if args.pose_interval <= 0 or args.hand_interval <= 0:
         raise ValueError("--pose-interval 和 --hand-interval 必须大于 0")
+    if args.no_window:
+        args.json_output = True
 
     input_size = get_feature_dim(args.feature_mode)
     font_big = load_chinese_font(42)
@@ -412,6 +436,15 @@ def main():
     print(f"特征模式: {args.feature_mode}")
     print(f"模型输入: float32 [1, {SEQ_LEN}, {input_size}]")
     print(f"模型输出: logits [1, {len(labels)}]")
+    if args.json_output:
+        emit_json(
+            "ready",
+            backend="rknn",
+            model=args.model,
+            labels=labels,
+            feature_mode=args.feature_mode,
+            input_shape=[1, SEQ_LEN, input_size],
+        )
 
     pose_options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=POSE_MODEL),
@@ -445,6 +478,7 @@ def main():
 
     display_pred = "等待中..."
     display_conf = 0.0
+    last_json_time = 0.0
 
     fps_time = time.time()
     fps = 0.0
@@ -462,8 +496,9 @@ def main():
     with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
          HandLandmarker.create_from_options(hand_options) as hand_landmarker:
 
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        if not args.no_window:
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         while True:
             frame, frame_id, frame_time, read_ms, capture_failed = frame_reader.latest()
@@ -471,9 +506,10 @@ def main():
             if capture_failed and frame is None:
                 break
             if frame is None or frame_id == last_frame_id:
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
+                if not args.no_window:
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
                 time.sleep(0.001)
                 continue
 
@@ -582,56 +618,83 @@ def main():
                         display_pred = "识别中..."
                         display_conf = raw_conf
 
-            draw_start = time.perf_counter()
-            draw_roi(frame)
-
-            bar_w = min(160, max(110, frame.shape[1] // 4))
-            bar_h = 28
-            bar_x = max(20, frame.shape[1] - bar_w - 30)
-            bar_y = min(frame.shape[0] - 60, 220)
-            draw_progress_bar(frame, min(window_duration, WINDOW_SEC), WINDOW_SEC, bar_x, bar_y, bar_w, bar_h)
-            cv2.putText(frame, "时间窗口进度", (bar_x, bar_y - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-
-            overlay_items = [
-                (f"预测结果：{display_pred}", (30, 35), font_big, (0, 255, 0)),
-                (f"置信度：{display_conf:.2f}", (30, 95), font_mid, (0, 255, 0)),
-                (f"窗口帧：{raw_frame_count}  时长：{window_duration:.2f}s",
-                 (30, 140), font_mid, (255, 255, 255)),
-                (f"FPS：{fps:.1f}", (30, 185), font_mid, (255, 255, 255)),
-            ]
-
-            if args.profile:
-                overlay_items.extend([
-                    (f"采集:{capture_ms:.1f}ms  延迟:{frame_age_ms:.1f}ms",
-                     (30, 230), font_mid, (255, 255, 0)),
-                    (f"Pose:{pose_ms:.1f}ms  Hand:{hand_ms:.1f}ms",
-                     (30, 275), font_mid, (255, 255, 0)),
-                    (f"RKNN:{rknn_ms:.1f}ms  绘制:{draw_ms:.1f}ms",
-                     (30, 320), font_mid, (255, 255, 0)),
-                ])
-
-            frame = draw_chinese_items(frame, overlay_items)
-
-            draw_ms = update_ema(draw_ms, (time.perf_counter() - draw_start) * 1000.0)
-
-            display_frame = frame
-            if args.display_width > 0 and args.display_height > 0:
-                display_frame = cv2.resize(
-                    frame,
-                    (args.display_width, args.display_height),
-                    interpolation=cv2.INTER_LINEAR,
+            if args.json_output and now - last_json_time >= args.json_interval:
+                emit_json(
+                    "result",
+                    text=display_pred,
+                    confidence=round(display_conf, 4),
+                    fps=round(fps, 2),
+                    ready=bool(ready_to_predict),
+                    hands_valid=bool(has_valid_hand(keypoints)),
+                    sequence_frames=raw_frame_count,
+                    window_sec=round(window_duration, 3),
+                    frame_id=int(frame_id),
+                    frame_index=frame_index,
+                    latency_ms={
+                        "capture": round(capture_ms, 3),
+                        "frame_age": round(frame_age_ms, 3),
+                        "pose": round(pose_ms, 3),
+                        "hand": round(hand_ms, 3),
+                        "rknn": round(rknn_ms, 3),
+                        "draw": round(draw_ms, 3),
+                    },
                 )
+                last_json_time = now
 
-            cv2.imshow(WINDOW_NAME, display_frame)
+            if not args.no_window:
+                draw_start = time.perf_counter()
+                draw_roi(frame)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
+                bar_w = min(160, max(110, frame.shape[1] // 4))
+                bar_h = 28
+                bar_x = max(20, frame.shape[1] - bar_w - 30)
+                bar_y = min(frame.shape[0] - 60, 220)
+                draw_progress_bar(frame, min(window_duration, WINDOW_SEC), WINDOW_SEC, bar_x, bar_y, bar_w, bar_h)
+                cv2.putText(frame, "时间窗口进度", (bar_x, bar_y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+                overlay_items = [
+                    (f"预测结果：{display_pred}", (30, 35), font_big, (0, 255, 0)),
+                    (f"置信度：{display_conf:.2f}", (30, 95), font_mid, (0, 255, 0)),
+                    (f"窗口帧：{raw_frame_count}  时长：{window_duration:.2f}s",
+                     (30, 140), font_mid, (255, 255, 255)),
+                    (f"FPS：{fps:.1f}", (30, 185), font_mid, (255, 255, 255)),
+                ]
+
+                if args.profile:
+                    overlay_items.extend([
+                        (f"采集:{capture_ms:.1f}ms  延迟:{frame_age_ms:.1f}ms",
+                         (30, 230), font_mid, (255, 255, 0)),
+                        (f"Pose:{pose_ms:.1f}ms  Hand:{hand_ms:.1f}ms",
+                         (30, 275), font_mid, (255, 255, 0)),
+                        (f"RKNN:{rknn_ms:.1f}ms  绘制:{draw_ms:.1f}ms",
+                         (30, 320), font_mid, (255, 255, 0)),
+                    ])
+
+                frame = draw_chinese_items(frame, overlay_items)
+
+                draw_ms = update_ema(draw_ms, (time.perf_counter() - draw_start) * 1000.0)
+
+                display_frame = frame
+                if args.display_width > 0 and args.display_height > 0:
+                    display_frame = cv2.resize(
+                        frame,
+                        (args.display_width, args.display_height),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+
+                cv2.imshow(WINDOW_NAME, display_frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
 
     frame_reader.stop()
     cap.release()
-    cv2.destroyAllWindows()
+    if not args.no_window:
+        cv2.destroyAllWindows()
+    if args.json_output:
+        emit_json("stopped")
     rknn.release()
 
 
