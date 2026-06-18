@@ -4,6 +4,8 @@ import sys
 import time
 import json
 import threading
+import queue
+import base64
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -58,6 +60,7 @@ HAND_DIM = 21 * 3
 CONF_THRESHOLD = 0.70      # 低于这个置信度，显示“识别中...”
 SMOOTH_WINDOW = 6          # 最近8次预测做投票
 MIN_VOTE_COUNT = 3         # 至少4票一致才更新显示
+TOKEN_ADD_INTERVAL = 0.8
 # ================= MediaPipe =================
 BaseOptions = mp.tasks.BaseOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
@@ -111,6 +114,28 @@ def parse_args():
         type=float,
         default=0.2,
         help="Minimum seconds between JSON status messages.",
+    )
+    parser.add_argument(
+        "--preview-output",
+        action="store_true",
+        help="Emit low-rate JPEG preview frames as base64 JSON events.",
+    )
+    parser.add_argument(
+        "--preview-interval",
+        type=float,
+        default=0.2,
+        help="Minimum seconds between preview JPEG messages.",
+    )
+    parser.add_argument(
+        "--preview-width",
+        type=int,
+        default=640,
+        help="Width of emitted preview JPEG frames.",
+    )
+    parser.add_argument(
+        "--frame-stdin",
+        action="store_true",
+        help="Read JPEG frames from stdin JSON commands instead of opening a camera.",
     )
     return parser.parse_args()
 
@@ -217,6 +242,121 @@ def emit_json(event_type, **payload):
     payload["type"] = event_type
     payload["time"] = time.time()
     print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def emit_preview(frame, preview_width):
+    h, w = frame.shape[:2]
+    if preview_width > 0 and w > preview_width:
+        preview_height = max(1, int(h * preview_width / w))
+        frame = cv2.resize(frame, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
+
+    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    if not ok:
+        return
+
+    emit_json(
+        "preview",
+        image=base64.b64encode(encoded.tobytes()).decode("ascii"),
+        width=int(frame.shape[1]),
+        height=int(frame.shape[0]),
+    )
+
+
+def compose_tokens_rule(tokens):
+    """Small offline composer; RKLLM/API composer can replace this later."""
+    if not tokens:
+        return ""
+
+    compact = []
+    for token in tokens:
+        if token and (not compact or compact[-1] != token):
+            compact.append(token)
+
+    token_set = set(compact)
+    if "发烧" in token_set:
+        prefix = "我" if "我" in token_set else "患者"
+        return f"{prefix}发烧了。"
+    if "咳嗽" in token_set:
+        prefix = "我" if "我" in token_set else "患者"
+        return f"{prefix}咳嗽。"
+    if "头" in token_set and "疼痛" in token_set:
+        subject = "我" if "我" in token_set else "患者"
+        time_word = "昨天" if "昨天" in token_set else ""
+        return f"{subject}{time_word}头疼。"
+
+    return "".join(compact) + "。"
+
+
+class StdinCommandReader:
+    """Read JSON command/frame lines from Qt without blocking inference."""
+
+    def __init__(self):
+        self.commands = queue.Queue()
+        self.frame_lock = threading.Lock()
+        self.frame = None
+        self.frame_id = 0
+        self.frame_time = 0.0
+        self.decode_ms = 0.0
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+
+    def drain(self):
+        items = []
+        while True:
+            try:
+                items.append(self.commands.get_nowait())
+            except queue.Empty:
+                return items
+
+    def latest_frame(self):
+        with self.frame_lock:
+            return self.frame, self.frame_id, self.frame_time, self.decode_ms
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            line = sys.stdin.readline()
+            if line == "":
+                time.sleep(0.05)
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                command = json.loads(line)
+            except json.JSONDecodeError:
+                emit_json("warning", message=f"invalid command: {line}")
+                continue
+            if isinstance(command, dict):
+                if command.get("cmd") == "frame":
+                    self._store_frame(command)
+                    continue
+                self.commands.put(command)
+
+    def _store_frame(self, command):
+        image_base64 = command.get("image")
+        if not image_base64:
+            return
+        start = time.perf_counter()
+        try:
+            encoded = np.frombuffer(base64.b64decode(image_base64), dtype=np.uint8)
+            frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        except Exception as exc:
+            emit_json("warning", message=f"frame decode failed: {exc}")
+            return
+        if frame is None or frame.size == 0:
+            return
+        decode_ms = (time.perf_counter() - start) * 1000.0
+        with self.frame_lock:
+            self.frame = frame
+            self.frame_id += 1
+            self.frame_time = time.time()
+            self.decode_ms = update_ema(self.decode_ms, decode_ms)
 
 
 # 绘制进度条：current/total 可以是帧数，也可以是秒数
@@ -458,19 +598,6 @@ def main():
         num_hands=2,
     )
 
-    cap = cv2.VideoCapture(args.camera)
-
-    if not cap.isOpened():
-        print("摄像头打开失败，可以通过 --camera 指定设备编号")
-        rknn.release()
-        return
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    frame_reader = LatestFrameReader(cap)
-    frame_reader.start()
-
     # 按时间缓存，而不是按固定帧数缓存。每项为 (timestamp, keypoints)
     sequence = deque()
     pred_history = deque(maxlen=SMOOTH_WINDOW)
@@ -479,6 +606,34 @@ def main():
     display_pred = "等待中..."
     display_conf = 0.0
     last_json_time = 0.0
+    last_preview_time = 0.0
+    recording = False
+    token_buffer = []
+    last_added_token = ""
+    last_added_time = 0.0
+    last_sentence = ""
+    command_reader = StdinCommandReader()
+    command_reader.start()
+
+    cap = None
+    frame_reader = None
+    if args.frame_stdin:
+        print("视频输入: Qt stdin JPEG frames")
+    else:
+        device_path = f"/dev/video{args.camera}"
+        cap = cv2.VideoCapture(args.camera, cv2.CAP_V4L2)
+
+        if not cap.isOpened():
+            print(f"摄像头打开失败: {device_path}，可以通过 --camera 指定设备编号")
+            command_reader.stop()
+            rknn.release()
+            return
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        frame_reader = LatestFrameReader(cap)
+        frame_reader.start()
 
     fps_time = time.time()
     fps = 0.0
@@ -501,10 +656,41 @@ def main():
             cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
         while True:
-            frame, frame_id, frame_time, read_ms, capture_failed = frame_reader.latest()
-            capture_ms = read_ms
-            if capture_failed and frame is None:
-                break
+            for command in command_reader.drain():
+                cmd = command.get("cmd")
+                if cmd == "start_recording":
+                    recording = True
+                    token_buffer = []
+                    last_added_token = ""
+                    last_added_time = 0.0
+                    last_sentence = ""
+                    emit_json("recording", active=True, tokens=token_buffer)
+                elif cmd == "stop_recording":
+                    recording = False
+                    last_sentence = compose_tokens_rule(token_buffer)
+                    emit_json("recording", active=False, tokens=token_buffer)
+                    emit_json("sentence", tokens=token_buffer, sentence=last_sentence)
+                elif cmd == "clear":
+                    recording = False
+                    token_buffer = []
+                    last_added_token = ""
+                    last_added_time = 0.0
+                    last_sentence = ""
+                    emit_json("recording", active=False, tokens=token_buffer)
+                    emit_json("sentence", tokens=token_buffer, sentence=last_sentence)
+                else:
+                    emit_json("warning", message=f"unknown command: {cmd}")
+
+            if args.frame_stdin:
+                frame, frame_id, frame_time, decode_ms = command_reader.latest_frame()
+                capture_ms = decode_ms
+                capture_failed = False
+            else:
+                frame, frame_id, frame_time, read_ms, capture_failed = frame_reader.latest()
+                capture_ms = read_ms
+                if capture_failed and frame is None:
+                    break
+
             if frame is None or frame_id == last_frame_id:
                 if not args.no_window:
                     key = cv2.waitKey(1) & 0xFF
@@ -618,11 +804,26 @@ def main():
                         display_pred = "识别中..."
                         display_conf = raw_conf
 
+            if (
+                recording and
+                display_pred not in ("等待中...", "识别中...") and
+                display_conf >= CONF_THRESHOLD and
+                display_pred != last_added_token and
+                now - last_added_time >= TOKEN_ADD_INTERVAL
+            ):
+                token_buffer.append(display_pred)
+                last_added_token = display_pred
+                last_added_time = now
+                emit_json("tokens", tokens=token_buffer)
+
             if args.json_output and now - last_json_time >= args.json_interval:
                 emit_json(
                     "result",
                     text=display_pred,
                     confidence=round(display_conf, 4),
+                    recording=recording,
+                    tokens=token_buffer,
+                    sentence=last_sentence,
                     fps=round(fps, 2),
                     ready=bool(ready_to_predict),
                     hands_valid=bool(has_valid_hand(keypoints)),
@@ -640,6 +841,10 @@ def main():
                     },
                 )
                 last_json_time = now
+
+            if args.preview_output and now - last_preview_time >= args.preview_interval:
+                emit_preview(frame, args.preview_width)
+                last_preview_time = now
 
             if not args.no_window:
                 draw_start = time.perf_counter()
@@ -689,12 +894,15 @@ def main():
                 if key == ord("q"):
                     break
 
-    frame_reader.stop()
-    cap.release()
+    if frame_reader is not None:
+        frame_reader.stop()
+    if cap is not None:
+        cap.release()
     if not args.no_window:
         cv2.destroyAllWindows()
     if args.json_output:
         emit_json("stopped")
+    command_reader.stop()
     rknn.release()
 
 

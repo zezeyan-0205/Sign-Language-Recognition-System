@@ -206,17 +206,19 @@ python3 scripts/infer/infer_realtime_rknn.py \
   --profile
 ```
 
-Run the Python RKNN worker without an OpenCV window for the Qt frontend:
+Run the Python RKNN worker without opening the camera or an OpenCV window for
+the Qt frontend. In this mode Qt owns the camera preview and sends resized JPEG
+frames to the worker through stdin:
 
 ```bash
 python3 scripts/infer/infer_realtime_rknn.py \
   --model artifacts/models/sign_tcn_best.rknn \
   --labels label_map.json \
-  --camera 21 \
   --width 1280 \
   --height 720 \
-  --pose-interval 8 \
-  --hand-interval 4 \
+  --pose-interval 4 \
+  --hand-interval 2 \
+  --frame-stdin \
   --no-window
 ```
 
@@ -230,8 +232,27 @@ export DISPLAY=:0.0
 ```
 
 `SignLanguageQt` starts the Python worker with `QProcess` and reads JSON Lines
-from stdout. The C++ MediaPipe demo path is currently optional; the Qt frontend
-uses the validated Python MediaPipe + RKNN pipeline.
+from stdout. Qt owns `/dev/video21`, shows the patient-side preview from a
+background OpenCV capture thread, draws the hand ROI on the preview, and sends a
+resized JPEG frame to Python about every 30 ms. The worker receives those frames
+with `--frame-stdin`, runs MediaPipe + RKNN, and sends recognition state back to
+Qt. The patient window shows the live preview, collection progress, and large
+recognition text; the doctor window presents an electronic medical-record style
+view. The C++ MediaPipe demo path is currently optional; the Qt frontend uses
+the validated Python MediaPipe + RKNN pipeline.
+
+The Qt frontend controls sentence collection through JSON commands written to
+the worker stdin:
+
+```json
+{"cmd":"start_recording"}
+{"cmd":"stop_recording"}
+{"cmd":"clear"}
+```
+
+The worker collects stable recognized tokens between "开始表达" and "结束表达",
+then emits a `sentence` JSON event. The current implementation uses a small
+offline rule composer; RKLLM or an API LLM can replace this composer later.
 
 For the upper-body + hand-xy model, use the matching feature mode:
 
