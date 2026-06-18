@@ -219,6 +219,8 @@ python3 scripts/infer/infer_realtime_rknn.py \
   --pose-interval 4 \
   --hand-interval 2 \
   --frame-stdin \
+  --composer rkllm \
+  --rkllm-url http://127.0.0.1:8080/rkllm_chat \
   --no-window
 ```
 
@@ -240,6 +242,13 @@ Qt. The patient window shows the live preview, collection progress, and large
 recognition text; the doctor window presents an electronic medical-record style
 view. The C++ MediaPipe demo path is currently optional; the Qt frontend uses
 the validated Python MediaPipe + RKNN pipeline.
+
+When RKLLM Flask is running locally, Qt starts the worker with
+`--composer rkllm` and `--rkllm-url http://127.0.0.1:8080/rkllm_chat`. If the
+LLM request fails or times out, the worker falls back to the local rule composer
+so the demo can still produce a sentence. The worker includes a `composer` field
+in `sentence` events, and Qt prints `sentence composer: rkllm` or
+`sentence composer: rule_fallback` in the terminal log.
 
 The Qt frontend controls sentence collection through JSON commands written to
 the worker stdin:

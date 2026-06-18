@@ -22,6 +22,7 @@ from scripts.common.keypoint_features import (
     get_feature_dim,
     prepare_sequence_array,
 )
+from scripts.common.sentence_composer import compose_sentence_with_source
 
 try:
     from rknnlite.api import RKNNLite
@@ -136,6 +137,23 @@ def parse_args():
         "--frame-stdin",
         action="store_true",
         help="Read JPEG frames from stdin JSON commands instead of opening a camera.",
+    )
+    parser.add_argument(
+        "--composer",
+        choices=("rule", "rkllm"),
+        default="rule",
+        help="Sentence composer used when recording stops.",
+    )
+    parser.add_argument(
+        "--rkllm-url",
+        default="http://127.0.0.1:8080/rkllm_chat",
+        help="RKLLM Flask endpoint used when --composer=rkllm.",
+    )
+    parser.add_argument(
+        "--llm-timeout",
+        type=float,
+        default=8.0,
+        help="Seconds to wait for the LLM composer before falling back to rules.",
     )
     return parser.parse_args()
 
@@ -260,31 +278,6 @@ def emit_preview(frame, preview_width):
         width=int(frame.shape[1]),
         height=int(frame.shape[0]),
     )
-
-
-def compose_tokens_rule(tokens):
-    """Small offline composer; RKLLM/API composer can replace this later."""
-    if not tokens:
-        return ""
-
-    compact = []
-    for token in tokens:
-        if token and (not compact or compact[-1] != token):
-            compact.append(token)
-
-    token_set = set(compact)
-    if "发烧" in token_set:
-        prefix = "我" if "我" in token_set else "患者"
-        return f"{prefix}发烧了。"
-    if "咳嗽" in token_set:
-        prefix = "我" if "我" in token_set else "患者"
-        return f"{prefix}咳嗽。"
-    if "头" in token_set and "疼痛" in token_set:
-        subject = "我" if "我" in token_set else "患者"
-        time_word = "昨天" if "昨天" in token_set else ""
-        return f"{subject}{time_word}头疼。"
-
-    return "".join(compact) + "。"
 
 
 class StdinCommandReader:
@@ -612,6 +605,7 @@ def main():
     last_added_token = ""
     last_added_time = 0.0
     last_sentence = ""
+    last_sentence_source = ""
     command_reader = StdinCommandReader()
     command_reader.start()
 
@@ -664,20 +658,32 @@ def main():
                     last_added_token = ""
                     last_added_time = 0.0
                     last_sentence = ""
+                    last_sentence_source = ""
                     emit_json("recording", active=True, tokens=token_buffer)
                 elif cmd == "stop_recording":
                     recording = False
-                    last_sentence = compose_tokens_rule(token_buffer)
+                    last_sentence, last_sentence_source = compose_sentence_with_source(
+                        token_buffer,
+                        backend=args.composer,
+                        rkllm_url=args.rkllm_url,
+                        timeout=args.llm_timeout,
+                    )
                     emit_json("recording", active=False, tokens=token_buffer)
-                    emit_json("sentence", tokens=token_buffer, sentence=last_sentence)
+                    emit_json(
+                        "sentence",
+                        tokens=token_buffer,
+                        sentence=last_sentence,
+                        composer=last_sentence_source,
+                    )
                 elif cmd == "clear":
                     recording = False
                     token_buffer = []
                     last_added_token = ""
                     last_added_time = 0.0
                     last_sentence = ""
+                    last_sentence_source = ""
                     emit_json("recording", active=False, tokens=token_buffer)
-                    emit_json("sentence", tokens=token_buffer, sentence=last_sentence)
+                    emit_json("sentence", tokens=token_buffer, sentence=last_sentence, composer=last_sentence_source)
                 else:
                     emit_json("warning", message=f"unknown command: {cmd}")
 
@@ -824,6 +830,7 @@ def main():
                     recording=recording,
                     tokens=token_buffer,
                     sentence=last_sentence,
+                    composer=last_sentence_source,
                     fps=round(fps, 2),
                     ready=bool(ready_to_predict),
                     hands_valid=bool(has_valid_hand(keypoints)),

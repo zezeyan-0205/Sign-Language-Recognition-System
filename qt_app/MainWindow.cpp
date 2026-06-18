@@ -420,7 +420,11 @@ void MainWindow::consumeJson(const QJsonObject& object)
         const QStringList tokens = jsonTokens(object.value(QStringLiteral("tokens")).toArray());
         tokens_label_->setText(tokensText(object.value(QStringLiteral("tokens")).toArray()));
         const QString sentence = object.value(QStringLiteral("sentence")).toString();
+        const QString composer = object.value(QStringLiteral("composer")).toString();
         sentence_label_->setText(sentence.isEmpty() ? QStringLiteral("整理句子：-") : QStringLiteral("整理句子：%1").arg(sentence));
+        if (!composer.isEmpty()) {
+            appendLog(QStringLiteral("sentence composer: %1").arg(composer));
+        }
         if (doctor_window_) {
             doctor_window_->updateTokens(tokens);
             doctor_window_->updateSentence(sentence);
@@ -658,6 +662,9 @@ QStringList MainWindow::workerArguments() const
         QStringLiteral("--hand-interval"), QStringLiteral("2"),
         QStringLiteral("--json-interval"), json_interval_edit_->text().trimmed(),
         QStringLiteral("--frame-stdin"),
+        QStringLiteral("--composer"), QStringLiteral("rkllm"),
+        QStringLiteral("--rkllm-url"), QStringLiteral("http://127.0.0.1:8080/rkllm_chat"),
+        QStringLiteral("--llm-timeout"), QStringLiteral("8"),
         QStringLiteral("--no-window"),
     };
 }
