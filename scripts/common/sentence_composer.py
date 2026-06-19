@@ -72,8 +72,14 @@ def build_rkllm_prompt(tokens):
 def is_valid_llm_sentence(sentence):
     if not sentence:
         return False
-    forbidden = ("医生", "用户", "助手", "系统", "词汇", "主诉", "模板", "think", "im_")
+    forbidden = (
+        "医生", "用户", "助手", "系统", "词汇", "词组", "主诉", "模板",
+        "提供", "以下", "分别", "以及", "英文", "翻译", "think", "im_",
+        "yesterday", "pain", "fever", "cough",
+    )
     if any(word in sentence for word in forbidden):
+        return False
+    if re.search(r"[A-Za-z]", sentence):
         return False
     if len(sentence) > 40:
         return False

@@ -1,5 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Window 2.15
+import SignLanguage 1.0
 
 Window {
     id: patientWindow
@@ -71,20 +72,6 @@ Window {
 
     Component.onCompleted: {
         placeWindowOnScreen(patientWindow, "HDMI", 0, true)
-    }
-
-    Connections {
-        target: signController
-        function onLogLine(line) {
-            console.log(line)
-            logModel.append({"line": line})
-            if (logModel.count > 80)
-                logModel.remove(0)
-        }
-    }
-
-    ListModel {
-        id: logModel
     }
 
     Rectangle {
@@ -160,18 +147,16 @@ Window {
             radius: 8
             clip: true
 
-            Image {
+            CameraView {
+                id: patientCameraView
+                objectName: "patientCameraView"
                 anchors.fill: parent
                 anchors.margins: 10
-                source: signController.previewSource
-                fillMode: Image.PreserveAspectFit
-                cache: false
-                asynchronous: true
             }
 
             Text {
                 anchors.centerIn: parent
-                visible: signController.previewSource.toString() === ""
+                visible: !patientCameraView.hasFrame
                 text: "摄像头画面等待中"
                 color: "#dbe4ec"
                 font.pixelSize: 34
@@ -316,7 +301,7 @@ Window {
                 BigButton {
                     width: parent.width / 3 - 10
                     height: parent.height
-                    label: "开始表达"
+                    label: "开始"
                     color: buttonColor(signController.running, primary)
                     enabled: signController.running
                     onClicked: signController.startRecording()
@@ -324,7 +309,7 @@ Window {
                 BigButton {
                     width: parent.width / 3 - 10
                     height: parent.height
-                    label: "结束整理"
+                    label: "结束"
                     color: buttonColor(signController.running, "#1f6fb2")
                     enabled: signController.running
                     onClicked: signController.stopRecording()
@@ -525,16 +510,25 @@ Window {
                     radius: 8
                     border.color: "#d8dee6"
 
-                    ListView {
+                    Column {
                         anchors.fill: parent
-                        anchors.margins: 10
-                        model: logModel
-                        clip: true
-                        delegate: Text {
-                            width: ListView.view.width
-                            text: line
+                        anchors.margins: 16
+                        spacing: 8
+
+                        Text {
+                            width: parent.width
+                            text: "系统状态：" + signController.statusText
+                            color: "#374151"
+                            font.pixelSize: 20
+                            font.bold: true
+                            elide: Text.ElideRight
+                        }
+
+                        Text {
+                            width: parent.width
+                            text: signController.latencyText
                             color: "#586575"
-                            font.pixelSize: 14
+                            font.pixelSize: 16
                             elide: Text.ElideRight
                         }
                     }

@@ -2,23 +2,18 @@
 #define SIGN_LANGUAGE_QML_SIGN_CONTROLLER_HPP
 
 #include <QByteArray>
-#include <QElapsedTimer>
-#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QProcess>
 #include <QStringList>
 #include <QTimer>
-#include <QUrl>
 
 #include <atomic>
 #include <mutex>
-#include <opencv2/core.hpp>
-#include <opencv2/videoio.hpp>
 #include <thread>
 
-class PreviewImageProvider;
+class CameraView;
 
 class SignController : public QObject {
     Q_OBJECT
@@ -31,12 +26,12 @@ class SignController : public QObject {
     Q_PROPERTY(QString sentenceText READ sentenceText NOTIFY sentenceChanged)
     Q_PROPERTY(QString composerText READ composerText NOTIFY sentenceChanged)
     Q_PROPERTY(int collectProgress READ collectProgress NOTIFY progressChanged)
-    Q_PROPERTY(QUrl previewSource READ previewSource NOTIFY previewSourceChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
 
 public:
-    explicit SignController(PreviewImageProvider* previewProvider, QObject* parent = nullptr);
+    explicit SignController(QObject* parent = nullptr);
     ~SignController() override;
+    void setCameraView(CameraView* cameraView);
 
     QString currentWord() const { return current_word_; }
     QString confidenceText() const { return confidence_text_; }
@@ -47,7 +42,6 @@ public:
     QString sentenceText() const { return sentence_text_; }
     QString composerText() const { return composer_text_; }
     int collectProgress() const { return collect_progress_; }
-    QUrl previewSource() const { return preview_source_; }
     bool running() const { return running_; }
 
     Q_INVOKABLE void startSystem();
@@ -63,7 +57,6 @@ signals:
     void tokensChanged();
     void sentenceChanged();
     void progressChanged();
-    void previewSourceChanged();
     void runningChanged();
     void logLine(const QString& line);
 
@@ -71,6 +64,7 @@ private slots:
     void readStdout();
     void readStderr();
     void updateLocalPreview();
+    void logDiagnostics();
     void handleFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void handleError(QProcess::ProcessError error);
 
@@ -83,8 +77,6 @@ private:
     void startLocalPreview();
     void stopLocalPreview();
     void capturePreviewFrames(int cameraId, int width, int height);
-    void publishPreviewFrame(const cv::Mat& frame);
-    void sendFrameToWorker(const cv::Mat& frame);
     void sendWorkerCommand(const QString& command);
     QString projectPath(const QString& relativePath) const;
     QStringList workerArguments() const;
@@ -93,17 +85,27 @@ private:
     void setProgress(int progress);
 
     QProcess worker_;
-    PreviewImageProvider* preview_provider_ = nullptr;
+    CameraView* camera_view_ = nullptr;
     QTimer preview_timer_;
-    QElapsedTimer frame_send_timer_;
+    QTimer diagnostics_timer_;
     std::thread preview_thread_;
     std::mutex preview_mutex_;
-    cv::Mat latest_preview_frame_;
-    int latest_preview_frame_id_ = 0;
-    int shown_preview_frame_id_ = 0;
-    int published_preview_frame_id_ = 0;
+    QByteArray latest_worker_frame_line_;
+    int latest_worker_frame_id_ = 0;
+    int sent_worker_frame_id_ = 0;
+    int latest_worker_frame_width_ = 0;
+    int latest_worker_frame_height_ = 0;
     std::atomic_bool preview_stop_{false};
+    std::atomic_bool preview_update_pending_{false};
+    std::atomic<unsigned long long> capture_frames_{0};
+    std::atomic<unsigned long long> preview_delivered_{0};
+    std::atomic<unsigned long long> preview_dropped_{0};
+    std::atomic<unsigned long long> worker_frames_encoded_{0};
+    std::atomic<unsigned long long> worker_frames_sent_{0};
+    std::atomic<unsigned long long> worker_frames_backpressure_{0};
+    std::atomic<unsigned long long> worker_results_{0};
     bool local_preview_active_ = false;
+    bool has_collected_tokens_ = false;
     QByteArray stdout_buffer_;
     QByteArray stderr_buffer_;
 
@@ -116,7 +118,7 @@ private:
     QString sentence_text_ = QStringLiteral("整理句子：-");
     QString composer_text_ = QStringLiteral("整理来源：-");
     int collect_progress_ = 0;
-    QUrl preview_source_;
+    std::atomic_bool recording_active_{false};
     bool running_ = false;
 };
 

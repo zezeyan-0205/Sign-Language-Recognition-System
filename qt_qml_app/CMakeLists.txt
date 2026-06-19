@@ -3,8 +3,8 @@ set(CMAKE_AUTORCC ON)
 
 add_executable(SignLanguageQml
     main.cpp
-    PreviewImageProvider.cpp
-    PreviewImageProvider.hpp
+    CameraView.cpp
+    CameraView.hpp
     SignController.cpp
     SignController.hpp
     resources.qrc

@@ -39,6 +39,7 @@ WINDOW_SEC = 1.5          # 与采集脚本的 --record_sec 保持一致
 PREDICT_INTERVAL = 0.05
 INPUT_SIZE = 258
 MIN_HAND_ACTIVE_FRAMES = 8
+HAND_LOST_GRACE_SEC = 0.35
 MODEL_PATH = "artifacts/models/sign_tcn_best.rknn"
 LABEL_MAP_PATH = "label_map.json"
 WINDOW_NAME = "Realtime Sign Recognition"
@@ -606,6 +607,8 @@ def main():
     last_added_time = 0.0
     last_sentence = ""
     last_sentence_source = ""
+    last_valid_hand_time = 0.0
+    hand_lost_frames = 0
     command_reader = StdinCommandReader()
     command_reader.start()
 
@@ -738,15 +741,20 @@ def main():
 
             keypoints = extract_keypoints(last_pose_result, last_hand_result)
 
-            if has_valid_hand(keypoints):
+            hands_valid = has_valid_hand(keypoints)
+            if hands_valid:
                 # 有手时，把当前帧加入“最近 WINDOW_SEC 秒”的时间窗口
                 sequence.append((now, keypoints))
+                last_valid_hand_time = now
+                hand_lost_frames = 0
             else:
-                # 没有手时，认为用户还没开始动作，清空缓存
-                sequence.clear()
-                pred_history.clear()
-                display_pred = "等待中..."
-                display_conf = 0.0
+                hand_lost_frames += 1
+                # MediaPipe 会偶发丢手一两帧，短暂丢失时保留当前窗口，避免进度条反复归零。
+                if last_valid_hand_time <= 0 or now - last_valid_hand_time > HAND_LOST_GRACE_SEC:
+                    sequence.clear()
+                    pred_history.clear()
+                    display_pred = "等待中..."
+                    display_conf = 0.0
 
             # 只保留最近 WINDOW_SEC 秒的数据
             while sequence and now - sequence[0][0] > WINDOW_SEC:
@@ -833,7 +841,8 @@ def main():
                     composer=last_sentence_source,
                     fps=round(fps, 2),
                     ready=bool(ready_to_predict),
-                    hands_valid=bool(has_valid_hand(keypoints)),
+                    hands_valid=bool(hands_valid),
+                    hand_lost_frames=int(hand_lost_frames),
                     sequence_frames=raw_frame_count,
                     window_sec=round(window_duration, 3),
                     frame_id=int(frame_id),
