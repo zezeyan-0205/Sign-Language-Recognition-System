@@ -1,6 +1,290 @@
 # RK3588 手语交互系统当前进度记录
 
-日期：2026-06-18
+日期：2026-06-19
+
+## 当前阶段结论
+
+当前项目已经形成一条稳定的板端演示主线：
+
+```text
+Qt/QML 双屏界面
+    -> Qt 采集摄像头并显示患者端实时画面
+    -> Qt 按需发送 JPEG 帧到 Python worker
+    -> Python MediaPipe Pose + Hand 提取关键点
+    -> TCN RKNN 在 RK3588 NPU 上完成词汇识别
+    -> RKLLM / 规则兜底整理患者主诉
+    -> Qt 患者端和医生端同步显示结果
+```
+
+经过 C++ MediaPipe 路线探索后，当前演示主线暂定为：
+
+```text
+Python 负责 MediaPipe + RKNN + 句子整理
+Qt/QML 负责双屏 UI、摄像头预览、操作按钮和状态显示
+```
+
+C++ MediaPipe 相关代码和 wrapper 实验仍保留在工作区，但不是当前演示主线。
+
+## 当前可演示能力
+
+- 患者端显示实时摄像头画面、ROI 框、当前识别词、采集进度和大按钮。
+- 医生端显示电子病历风格界面，包括实时识别、患者主诉、识别词、症状和时间。
+- 支持 HDMI + DSI 双屏布局：
+  - DSI：患者端，保留触摸操作入口。
+  - HDMI：医生端，显示电子病历式信息面板。
+- 支持一键启动脚本：
+
+```bash
+~/game.sh
+```
+
+该脚本会进入项目目录并调用：
+
+```bash
+./scripts/run_qml_with_ai.sh
+```
+
+脚本会自动检查 / 启动 RKLLM Flask 服务，然后启动 QML 界面。
+
+## 当前交互逻辑
+
+系统启动后先进入待机状态：
+
+```text
+点击绿色按钮开始识别
+```
+
+此时 Qt 只负责摄像头预览，不向 Python worker 发送识别帧，降低空闲负载。
+
+点击绿色按钮后进入识别：
+
+```text
+开始 -> 等待中 / 识别中 / 稳定词汇
+```
+
+点击结束后：
+
+- 如果已经识别到词汇，则调用句子整理逻辑。
+- 如果还没有识别到词汇，则提示：
+
+```text
+请先进行手语识别后再按结束按钮
+```
+
+当前按钮文案已简化为：
+
+```text
+开始
+结束
+删除
+清空
+启动系统
+停止系统
+```
+
+其中“删除”用于移除最后一个识别词，适合误识别后继续完成当前句子；“清空”用于清空整句话并重新开始。
+
+## 当前运行参数
+
+Qt 端摄像头采集：
+
+```text
+1280x720
+```
+
+患者端预览显示：
+
+```text
+960x540
+```
+
+发送给 Python / MediaPipe 的识别帧：
+
+```text
+640x360 JPEG
+```
+
+选择 `640x360` 的原因是它在当前 RK3588 板端速度更稳定。`1280x720` 精度略好，但 MediaPipe 处理明显变慢；`960x540` 是折中方案，已经测试过，后续仍可按现场效果切换。
+
+Python worker 当前由 Qt 启动，核心参数为：
+
+```bash
+python3 scripts/infer/infer_realtime_rknn.py \
+  --model artifacts/models/sign_tcn_best.rknn \
+  --labels label_map.json \
+  --camera 21 \
+  --width 1280 \
+  --height 720 \
+  --pose-interval 4 \
+  --hand-interval 2 \
+  --json-interval 0.2 \
+  --frame-stdin \
+  --composer rkllm \
+  --rkllm-url http://127.0.0.1:8080/rkllm_chat \
+  --llm-timeout 8 \
+  --no-window
+```
+
+注意：`--frame-stdin` 模式下，Python 不再直接打开摄像头，实际识别帧来自 Qt stdin。
+
+## RKLLM 后台服务
+
+当前使用 DeepSeek-R1-Distill-Qwen-1.5B 的 RKLLM 模型作为句子整理后端：
+
+```bash
+cd ~/rkllm_server
+
+python3 flask_server.py \
+  --rkllm_model_path /home/elf/models/DeepSeek-R1-Distill-Qwen-1.5B_W8A8_RK3588.rkllm \
+  --target_platform rk3588
+```
+
+启动成功后服务地址为：
+
+```text
+http://127.0.0.1:8080/rkllm_chat
+```
+
+`scripts/run_qml_with_ai.sh` 会在需要时自动启动该服务，并将日志写入：
+
+```text
+artifacts/logs/rkllm_server.log
+```
+
+## 句子整理策略
+
+当前句子整理采用：
+
+```text
+RKLLM 优先 + 规则兜底
+```
+
+由于板端 1.5B LLM 对极短词序输入不够稳定，容易出现解释型输出或中英混杂，例如：
+
+```text
+提供了两个词组：“我”和“头”，以及“yesterday”和“pain”
+```
+
+因此已加入后处理过滤：
+
+- 包含英文字符时判定为非法输出。
+- 包含“医生、用户、助手、系统、词汇、词组、主诉、提供、以下、分别、以及”等解释型词时判定为非法输出。
+- 非法输出会自动回退到规则句子。
+
+当前更稳的方向是：短词主诉以规则槽位为主，LLM 只做辅助润色。
+
+## 手部丢失容错
+
+之前实时识别中只要某一帧 `has_valid_hand == false` 就会清空序列，导致用户明明手还在 ROI 框内，采集进度却突然归零。
+
+现在新增短暂丢手容忍：
+
+```text
+HAND_LOST_GRACE_SEC = 0.35
+```
+
+效果：
+
+- 短暂丢手 0.35 秒内不清空进度，只暂停追加关键点帧。
+- 超过 0.35 秒仍未检测到手，才清空序列。
+- Qt 状态栏会显示 `lost N`，用于判断是否存在 MediaPipe 偶发丢手。
+
+## QML 稳定性优化
+
+QML 版本曾出现“界面像卡死，但后台诊断仍在增长”的现象。诊断日志显示：
+
+```text
+ui=alive
+capture 持续增长
+preview_ok 持续增长
+sent 持续增长
+results 持续增长
+backpressure=0
+```
+
+说明 Python / MediaPipe / RKNN 链路没有卡死，问题更像 Qt Quick 渲染层或窗口显示刷新问题。
+
+已做优化：
+
+- 去掉 `ImageProvider + image://` 预览刷新方式。
+- 新增 `CameraView`，使用 `QQuickPaintedItem` 直接绘制 QImage。
+- 去掉 `QQuickPaintedItem::FramebufferObject` 渲染目标，避免 RK3588 + Mali + Qt5 下可能的 FBO 渲染不稳定。
+- 默认设置：
+
+```text
+QT_QUICK_BACKEND=software
+QSG_RENDER_LOOP=basic
+```
+
+- QML 界面不再实时追加所有日志到 ListView，诊断日志只输出到终端。
+
+## 诊断日志
+
+Qt 会周期性输出诊断信息，例如：
+
+```text
+diag ui=alive running=1 recording=1 worker_state=2 stdin_bytes=0 capture=134 preview_ok=134 preview_drop=0 encoded=131 sent=130 backpressure=0 worker_latest=131 worker_sent_id=130 results=44 recog_size=640x360
+```
+
+字段含义：
+
+- `ui=alive`：Qt 主线程定时器仍在运行。
+- `capture`：Qt 摄像头采集帧计数。
+- `preview_ok`：成功投递到 QML 预览的帧数。
+- `preview_drop`：QML 来不及消费时主动丢弃的预览帧数。
+- `encoded`：编码为 JPEG 的识别帧数。
+- `sent`：发送给 Python worker 的帧数。
+- `backpressure`：Python stdin 积压次数。
+- `results`：Python 返回识别结果次数。
+- `recog_size`：当前送入 Python / MediaPipe 的识别帧尺寸。
+
+如果界面出现异常，应优先根据该日志判断卡点。
+
+## 最近提交
+
+上一稳定版里程碑提交：
+
+```text
+6c839d71 fix(qt): stabilize QML recognition workflow
+```
+
+该提交包含：
+
+- QML 预览改为 `CameraView`。
+- 删除旧 `PreviewImageProvider`。
+- 增加一键启动脚本 `scripts/run_qml_with_ai.sh`。
+- 启动后待机，点击开始后才识别。
+- 结束按钮空词汇保护。
+- 删除最后一个识别词和清空整句话的患者端操作。
+- RKLLM 输出过滤与规则兜底。
+- MediaPipe 短暂丢手容错。
+- 诊断日志。
+
+## 当前遗留问题
+
+- QML 在 RK3588 板端仍需继续观察长期稳定性；如果再次出现显示层假死，可考虑退回 Qt Widgets 作为演示 UI。
+- 词序混乱时，RKLLM 不一定能稳定重组成句，建议后续完善规则槽位抽取。
+- DSI 触摸可用于患者端按钮操作；触摸按压动画在当前 Qt Quick software 渲染路径下不稳定，暂不作为演示重点。
+- C++ MediaPipe wrapper 已经验证基础 smoke test，但完整接入主程序时遇到 protobuf / 动态库 / 构建复杂度问题，当前暂停。
+
+## 下一步建议
+
+1. 固定当前 QML + Python + RKNN + RKLLM 演示流程，减少临时改动。
+2. 根据实际演示词汇表补充规则槽位：
+   - 主语：我 / 患者
+   - 时间：昨天 / 今天
+   - 部位：头
+   - 症状：疼痛 / 咳嗽 / 发烧
+3. 如果要继续提升准确率，优先从数据和识别帧尺寸平衡入手，而不是继续依赖 LLM 猜句。
+4. 演示前统一使用：
+
+```bash
+~/game.sh
+```
+
+---
+
+## 历史记录：2026-06-18
 
 ## 项目背景
 
@@ -530,7 +814,7 @@ export DISPLAY=:0.0
 
 ## 下一步建议
 
-1. 完善 Qt 医院场景 UI，例如患者端识别文本、医生端常用问诊短句、确认/清空/播报按钮。
+1. 完善 Qt 医院场景 UI，例如患者端识别文本、医生端常用问诊短句、确认/删除/清空/播报按钮。
 2. 将 Python worker 输出从单词级结果扩展为状态机短句，例如“我 发烧”“昨天 头 疼痛”。
 3. 增加 Qt 与 Python worker 的异常提示，例如摄像头打开失败、模型缺失、MediaPipe 模型缺失。
 4. 根据实际演示效果继续调节 `pose-interval`、`hand-interval`、采集分辨率和显示布局。

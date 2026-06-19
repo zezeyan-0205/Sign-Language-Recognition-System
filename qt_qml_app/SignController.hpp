@@ -48,6 +48,7 @@ public:
     Q_INVOKABLE void stopSystem();
     Q_INVOKABLE void startRecording();
     Q_INVOKABLE void stopRecording();
+    Q_INVOKABLE void deleteLastToken();
     Q_INVOKABLE void clearExpression();
 
 signals:

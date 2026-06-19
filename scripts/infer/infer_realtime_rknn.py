@@ -687,6 +687,15 @@ def main():
                     last_sentence_source = ""
                     emit_json("recording", active=False, tokens=token_buffer)
                     emit_json("sentence", tokens=token_buffer, sentence=last_sentence, composer=last_sentence_source)
+                elif cmd == "delete_last":
+                    removed_token = token_buffer.pop() if token_buffer else ""
+                    # 避免用户刚删掉一个错词后，同一手势被下一帧立刻重新加入。
+                    last_added_token = removed_token
+                    last_added_time = time.time() if removed_token else 0.0
+                    last_sentence = ""
+                    last_sentence_source = ""
+                    emit_json("tokens", tokens=token_buffer)
+                    emit_json("sentence", tokens=token_buffer, sentence=last_sentence, composer=last_sentence_source)
                 else:
                     emit_json("warning", message=f"unknown command: {cmd}")
 

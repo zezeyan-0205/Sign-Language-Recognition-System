@@ -45,6 +45,14 @@ QString latencySummary(const QJsonObject& latency)
         .arg(jsonNumber(latency, QStringLiteral("frame_age")));
 }
 
+bool isRecognizedWordText(const QString& text)
+{
+    return !text.isEmpty() &&
+           text != QStringLiteral("等待中...") &&
+           text != QStringLiteral("识别中...") &&
+           !text.contains(QStringLiteral("点击绿色按钮"));
+}
+
 }  // namespace
 
 SignController::SignController(QObject* parent)
@@ -156,6 +164,24 @@ void SignController::stopRecording()
     sentence_text_ = QStringLiteral("整理句子：正在整理...");
     emit sentenceChanged();
     sendWorkerCommand(QStringLiteral("stop_recording"));
+}
+
+void SignController::deleteLastToken()
+{
+    if (!has_collected_tokens_) {
+        sentence_text_ = QStringLiteral("整理句子：暂无可删除词汇");
+        setStatus(QStringLiteral("暂无可删除词汇"));
+        emit sentenceChanged();
+        appendLog(QStringLiteral("delete ignored: no recognized tokens"));
+        return;
+    }
+
+    sentence_text_ = recording_active_.load()
+        ? QStringLiteral("整理句子：继续识别中...")
+        : QStringLiteral("整理句子：-");
+    composer_text_ = QStringLiteral("整理来源：-");
+    emit sentenceChanged();
+    sendWorkerCommand(QStringLiteral("delete_last"));
 }
 
 void SignController::clearExpression()
@@ -327,6 +353,11 @@ void SignController::consumeJson(const QJsonObject& object)
         recording_active_.store(active);
         const QStringList tokens = jsonTokens(object.value(QStringLiteral("tokens")).toArray());
         has_collected_tokens_ = !tokens.isEmpty();
+        if (has_collected_tokens_) {
+            setProgress(100);
+        } else {
+            setProgress(0);
+        }
         setStatus(active ? QStringLiteral("表达采集中") : QStringLiteral("点击绿色按钮开始识别"));
         tokens_text_ = tokensDisplayText(object.value(QStringLiteral("tokens")).toArray());
         emit tokensChanged();
@@ -335,6 +366,11 @@ void SignController::consumeJson(const QJsonObject& object)
 
     if (type == QStringLiteral("tokens")) {
         has_collected_tokens_ = !jsonTokens(object.value(QStringLiteral("tokens")).toArray()).isEmpty();
+        if (has_collected_tokens_) {
+            setProgress(100);
+        } else {
+            setProgress(0);
+        }
         tokens_text_ = tokensDisplayText(object.value(QStringLiteral("tokens")).toArray());
         emit tokensChanged();
         return;
@@ -342,6 +378,11 @@ void SignController::consumeJson(const QJsonObject& object)
 
     if (type == QStringLiteral("sentence")) {
         has_collected_tokens_ = !jsonTokens(object.value(QStringLiteral("tokens")).toArray()).isEmpty();
+        if (has_collected_tokens_) {
+            setProgress(100);
+        } else {
+            setProgress(0);
+        }
         tokens_text_ = tokensDisplayText(object.value(QStringLiteral("tokens")).toArray());
         const QString sentence = object.value(QStringLiteral("sentence")).toString();
         const QString composer = object.value(QStringLiteral("composer")).toString();
@@ -384,7 +425,8 @@ void SignController::consumeJson(const QJsonObject& object)
     const int sequence_frames = object.value(QStringLiteral("sequence_frames")).toInt(0);
     const int hand_lost_frames = object.value(QStringLiteral("hand_lost_frames")).toInt(0);
     const double window_sec = object.value(QStringLiteral("window_sec")).toDouble(0.0);
-    setProgress(qBound(0, static_cast<int>((window_sec / 1.5) * 100.0), 100));
+    const int window_progress = qBound(0, static_cast<int>((window_sec / 1.5) * 100.0), 100);
+    setProgress(isRecognizedWordText(current_word_) ? 100 : window_progress);
     setStatus(
         QStringLiteral("%1 | frames %2 | window %3s | lost %4")
             .arg(hands_valid ? QStringLiteral("追踪中") : QStringLiteral("等待手部"))
