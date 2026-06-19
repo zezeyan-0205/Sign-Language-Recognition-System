@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/">
+        <file>qml/main.qml</file>
+        <file>qml/BigButton.qml</file>
+        <file>qml/MetricBox.qml</file>
+        <file>qml/RecordCard.qml</file>
+    </qresource>
+</RCC>

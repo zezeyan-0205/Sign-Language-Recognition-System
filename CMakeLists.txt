@@ -5,8 +5,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Threads REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core highgui imgcodecs imgproc)
+find_package(OpenCV REQUIRED COMPONENTS core highgui imgcodecs imgproc videoio)
 find_package(Qt5 COMPONENTS Core Widgets QUIET)
+find_package(Qt5 COMPONENTS Qml Quick QUIET)
+find_package(PkgConfig QUIET)
+
+if(PkgConfig_FOUND AND NOT (Qt5Qml_FOUND AND Qt5Quick_FOUND))
+    pkg_check_modules(QT5_QML_QUICK QUIET Qt5Qml Qt5Quick)
+endif()
 
 find_path(RKNN_INCLUDE_DIR rknn_api.h
     PATHS /usr/include /usr/include/rknn /usr/local/include
@@ -50,9 +56,22 @@ target_link_libraries(SignLanguagePipeline PRIVATE
 
 option(BUILD_QT_APP "Build the Qt frontend that drives the Python RKNN worker." ON)
 if(BUILD_QT_APP)
-    if(Qt5_FOUND)
+    if(Qt5Widgets_FOUND)
         add_subdirectory(qt_app)
     else()
         message(STATUS "Qt5 Core/Widgets not found; SignLanguageQt frontend will be skipped.")
+    endif()
+endif()
+
+option(BUILD_QML_APP "Build the QML frontend that drives the Python RKNN worker." ON)
+if(BUILD_QML_APP)
+    if(Qt5Qml_FOUND AND Qt5Quick_FOUND)
+        add_subdirectory(qt_qml_app)
+    elseif(Qt5Core_FOUND AND QT5_QML_QUICK_FOUND)
+        set(SIGN_QML_USE_PKGCONFIG ON)
+        add_subdirectory(qt_qml_app)
+    else()
+        message(STATUS "Qt5 Qml/Quick not found; SignLanguageQml frontend will be skipped.")
+        message(STATUS "Install qtdeclarative5-dev or provide pkg-config files for Qt5Qml/Qt5Quick.")
     endif()
 endif()
