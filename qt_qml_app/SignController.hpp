@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
+#include <QPointer>
 #include <QProcess>
 #include <QStringList>
 #include <QTimer>
@@ -32,6 +33,7 @@ public:
     explicit SignController(QObject* parent = nullptr);
     ~SignController() override;
     void setCameraView(CameraView* cameraView);
+    void setDoctorCameraView(CameraView* cameraView);
 
     QString currentWord() const { return current_word_; }
     QString confidenceText() const { return confidence_text_; }
@@ -50,6 +52,7 @@ public:
     Q_INVOKABLE void stopRecording();
     Q_INVOKABLE void deleteLastToken();
     Q_INVOKABLE void clearExpression();
+    Q_INVOKABLE void bindDoctorCameraView(QObject* cameraView);
 
 signals:
     void currentWordChanged();
@@ -87,6 +90,7 @@ private:
 
     QProcess worker_;
     CameraView* camera_view_ = nullptr;
+    QPointer<CameraView> doctor_camera_view_;
     QTimer preview_timer_;
     QTimer diagnostics_timer_;
     std::thread preview_thread_;
@@ -96,6 +100,12 @@ private:
     int sent_worker_frame_id_ = 0;
     int latest_worker_frame_width_ = 0;
     int latest_worker_frame_height_ = 0;
+    bool has_person_bbox_ = false;
+    bool has_body_roi_ = false;
+    bool has_dynamic_roi_ = false;
+    double person_bbox_[4] = {0.15, 0.0, 0.85, 1.0};
+    double body_roi_[4] = {0.15, 0.0, 0.85, 1.0};
+    double dynamic_roi_[4] = {0.15, 0.0, 0.85, 1.0};
     std::atomic_bool preview_stop_{false};
     std::atomic_bool preview_update_pending_{false};
     std::atomic<unsigned long long> capture_frames_{0};
@@ -105,8 +115,12 @@ private:
     std::atomic<unsigned long long> worker_frames_sent_{0};
     std::atomic<unsigned long long> worker_frames_backpressure_{0};
     std::atomic<unsigned long long> worker_results_{0};
+    std::atomic<int> latest_sequence_frames_{0};
+    std::atomic<int> latest_hand_lost_frames_{0};
+    std::atomic<int> latest_window_sec_milli_{0};
     bool local_preview_active_ = false;
     bool has_collected_tokens_ = false;
+    bool intentional_stop_ = false;
     QByteArray stdout_buffer_;
     QByteArray stderr_buffer_;
 

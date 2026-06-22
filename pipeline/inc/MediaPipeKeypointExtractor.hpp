@@ -2,6 +2,7 @@
 #define MEDIAPIPE_KEYPOINT_EXTRACTOR_HPP
 
 #include <cstdint>
+#include <memory>
 #include <opencv2/core.hpp>
 #include <string>
 #include <vector>
@@ -16,7 +17,7 @@ struct MediaPipeKeypointResult {
 // C++ MediaPipe 关键点提取接口。当前默认实现为可编译占位，真实实现放在同一封装内补齐。
 class MediaPipeKeypointExtractor {
 public:
-    MediaPipeKeypointExtractor() = default;
+    MediaPipeKeypointExtractor();
     ~MediaPipeKeypointExtractor();
 
     MediaPipeKeypointExtractor(const MediaPipeKeypointExtractor&) = delete;
@@ -27,6 +28,8 @@ public:
     MediaPipeKeypointResult extract(const cv::Mat& bgr_image, int64_t timestamp_ms);
 
 private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
     bool ready_ = false;
     std::string status_;
 };

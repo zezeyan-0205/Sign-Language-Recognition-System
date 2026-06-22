@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <iterator>
 
 namespace {
 
@@ -50,6 +51,9 @@ bool isRecognizedWordText(const QString& text)
     return !text.isEmpty() &&
            text != QStringLiteral("等待中...") &&
            text != QStringLiteral("识别中...") &&
+           text != QStringLiteral("请患者站在识别框内") &&
+           text != QStringLiteral("等待手部进入识别区") &&
+           !text.contains(QStringLiteral("点击开始按钮")) &&
            !text.contains(QStringLiteral("点击绿色按钮"));
 }
 
@@ -80,6 +84,16 @@ void SignController::setCameraView(CameraView* cameraView)
     camera_view_ = cameraView;
 }
 
+void SignController::setDoctorCameraView(CameraView* cameraView)
+{
+    doctor_camera_view_ = cameraView;
+}
+
+void SignController::bindDoctorCameraView(QObject* cameraView)
+{
+    doctor_camera_view_ = qobject_cast<CameraView*>(cameraView);
+}
+
 void SignController::startSystem()
 {
     if (worker_.state() != QProcess::NotRunning) {
@@ -87,9 +101,10 @@ void SignController::startSystem()
         return;
     }
 
+    intentional_stop_ = false;
     stdout_buffer_.clear();
     stderr_buffer_.clear();
-    current_word_ = QStringLiteral("点击绿色按钮开始识别");
+    current_word_ = QStringLiteral("点击开始按钮开始识别");
     confidence_text_ = QStringLiteral("置信度 -");
     fps_text_ = QStringLiteral("FPS -");
     latency_text_ = QStringLiteral("延迟 -");
@@ -116,22 +131,26 @@ void SignController::startSystem()
     startLocalPreview();
     diagnostics_timer_.start(3000);
     setRunning(true);
-    setStatus(QStringLiteral("点击绿色按钮开始识别"));
+    setStatus(QStringLiteral("点击开始按钮开始识别"));
 }
 
 void SignController::stopSystem()
 {
     recording_active_.store(false);
+    intentional_stop_ = true;
     if (worker_.state() != QProcess::NotRunning) {
         worker_.terminate();
         if (!worker_.waitForFinished(1500)) {
             worker_.kill();
             worker_.waitForFinished(1500);
         }
+    } else {
+        intentional_stop_ = false;
     }
     diagnostics_timer_.stop();
     stopLocalPreview();
     setRunning(false);
+    setStatus(QStringLiteral("已停止"));
 }
 
 void SignController::startRecording()
@@ -190,12 +209,12 @@ void SignController::clearExpression()
     has_collected_tokens_ = false;
     current_word_ = worker_.state() == QProcess::NotRunning
         ? QStringLiteral("等待中...")
-        : QStringLiteral("点击绿色按钮开始识别");
+        : QStringLiteral("点击开始按钮开始识别");
     tokens_text_ = QStringLiteral("已收集词汇：-");
     sentence_text_ = QStringLiteral("整理句子：-");
     composer_text_ = QStringLiteral("整理来源：-");
     setProgress(0);
-    setStatus(worker_.state() == QProcess::NotRunning ? QStringLiteral("未启动") : QStringLiteral("点击绿色按钮开始识别"));
+    setStatus(worker_.state() == QProcess::NotRunning ? QStringLiteral("未启动") : QStringLiteral("点击开始按钮开始识别"));
     emit currentWordChanged();
     emit tokensChanged();
     emit sentenceChanged();
@@ -271,7 +290,7 @@ void SignController::logDiagnostics()
 
     appendLog(
         QStringLiteral(
-            "diag ui=alive running=%1 recording=%2 worker_state=%3 stdin_bytes=%4 capture=%5 preview_ok=%6 preview_drop=%7 encoded=%8 sent=%9 backpressure=%10 worker_latest=%11 worker_sent_id=%12 results=%13 recog_size=%14x%15")
+            "diag ui=alive running=%1 recording=%2 worker_state=%3 stdin_bytes=%4 capture=%5 preview_ok=%6 preview_drop=%7 encoded=%8 sent=%9 backpressure=%10 worker_latest=%11 worker_sent_id=%12 results=%13 recog_size=%14x%15 sequence_frames=%16 window=%17s lost=%18")
             .arg(running_ ? 1 : 0)
             .arg(recording_active_.load() ? 1 : 0)
             .arg(static_cast<int>(worker_.state()))
@@ -286,7 +305,10 @@ void SignController::logDiagnostics()
             .arg(sent_worker_frame_id)
             .arg(worker_results_.load(std::memory_order_relaxed))
             .arg(worker_frame_width)
-            .arg(worker_frame_height));
+            .arg(worker_frame_height)
+            .arg(latest_sequence_frames_.load(std::memory_order_relaxed))
+            .arg(latest_window_sec_milli_.load(std::memory_order_relaxed) / 1000.0, 0, 'f', 2)
+            .arg(latest_hand_lost_frames_.load(std::memory_order_relaxed)));
 }
 
 void SignController::handleFinished(int exitCode, QProcess::ExitStatus exitStatus)
@@ -296,6 +318,7 @@ void SignController::handleFinished(int exitCode, QProcess::ExitStatus exitStatu
     stopLocalPreview();
     setRunning(false);
     setStatus(QStringLiteral("已停止"));
+    intentional_stop_ = false;
     appendLog(QStringLiteral("worker finished, exitCode=%1").arg(exitCode));
 }
 
@@ -304,7 +327,8 @@ void SignController::handleError(QProcess::ProcessError error)
     stopLocalPreview();
     diagnostics_timer_.stop();
     setRunning(false);
-    setStatus(QStringLiteral("错误"));
+    setStatus(intentional_stop_ ? QStringLiteral("已停止") : QStringLiteral("错误"));
+    intentional_stop_ = false;
     appendLog(QStringLiteral("worker error: %1").arg(static_cast<int>(error)));
 }
 
@@ -335,8 +359,8 @@ void SignController::consumeJson(const QJsonObject& object)
 {
     const QString type = object.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("ready")) {
-        current_word_ = QStringLiteral("点击绿色按钮开始识别");
-        setStatus(QStringLiteral("点击绿色按钮开始识别"));
+        current_word_ = QStringLiteral("点击开始按钮开始识别");
+        setStatus(QStringLiteral("点击开始按钮开始识别"));
         emit currentWordChanged();
         appendLog(QStringLiteral("worker ready"));
         return;
@@ -358,7 +382,7 @@ void SignController::consumeJson(const QJsonObject& object)
         } else {
             setProgress(0);
         }
-        setStatus(active ? QStringLiteral("表达采集中") : QStringLiteral("点击绿色按钮开始识别"));
+        setStatus(active ? QStringLiteral("表达采集中") : QStringLiteral("点击开始按钮开始识别"));
         tokens_text_ = tokensDisplayText(object.value(QStringLiteral("tokens")).toArray());
         emit tokensChanged();
         return;
@@ -421,12 +445,38 @@ void SignController::consumeJson(const QJsonObject& object)
         emit sentenceChanged();
     }
 
+    {
+        std::lock_guard<std::mutex> lock(preview_mutex_);
+        const auto readBox = [](const QJsonValue& value, double* out) -> bool {
+            if (!value.isObject()) {
+                return false;
+            }
+            const QJsonObject box = value.toObject();
+            out[0] = box.value(QStringLiteral("x_min")).toDouble(0.15);
+            out[1] = box.value(QStringLiteral("y_min")).toDouble(0.0);
+            out[2] = box.value(QStringLiteral("x_max")).toDouble(0.85);
+            out[3] = box.value(QStringLiteral("y_max")).toDouble(1.0);
+            return true;
+        };
+        has_person_bbox_ = readBox(object.value(QStringLiteral("person_bbox")), person_bbox_);
+        has_body_roi_ = readBox(object.value(QStringLiteral("body_roi")), body_roi_);
+        has_dynamic_roi_ = readBox(object.value(QStringLiteral("roi_box")), dynamic_roi_);
+    }
+
+    const QString tracking_status = object.value(QStringLiteral("tracking_status")).toString();
     const bool hands_valid = object.value(QStringLiteral("hands_valid")).toBool(false);
     const int sequence_frames = object.value(QStringLiteral("sequence_frames")).toInt(0);
     const int hand_lost_frames = object.value(QStringLiteral("hand_lost_frames")).toInt(0);
     const double window_sec = object.value(QStringLiteral("window_sec")).toDouble(0.0);
+    latest_sequence_frames_.store(sequence_frames, std::memory_order_relaxed);
+    latest_hand_lost_frames_.store(hand_lost_frames, std::memory_order_relaxed);
+    latest_window_sec_milli_.store(static_cast<int>(window_sec * 1000.0), std::memory_order_relaxed);
     const int window_progress = qBound(0, static_cast<int>((window_sec / 1.5) * 100.0), 100);
     setProgress(isRecognizedWordText(current_word_) ? 100 : window_progress);
+    if (!tracking_status.isEmpty()) {
+        setStatus(tracking_status);
+        return;
+    }
     setStatus(
         QStringLiteral("%1 | frames %2 | window %3s | lost %4")
             .arg(hands_valid ? QStringLiteral("追踪中") : QStringLiteral("等待手部"))
@@ -468,6 +518,9 @@ void SignController::startLocalPreview()
         sent_worker_frame_id_ = 0;
         latest_worker_frame_width_ = 0;
         latest_worker_frame_height_ = 0;
+        has_person_bbox_ = false;
+        has_body_roi_ = false;
+        has_dynamic_roi_ = false;
     }
     capture_frames_.store(0, std::memory_order_relaxed);
     preview_delivered_.store(0, std::memory_order_relaxed);
@@ -498,9 +551,18 @@ void SignController::stopLocalPreview()
         sent_worker_frame_id_ = 0;
         latest_worker_frame_width_ = 0;
         latest_worker_frame_height_ = 0;
+        has_person_bbox_ = false;
+        has_body_roi_ = false;
+        has_dynamic_roi_ = false;
     }
     preview_update_pending_.store(false);
     local_preview_active_ = false;
+    if (camera_view_) {
+        camera_view_->clearFrame();
+    }
+    if (doctor_camera_view_) {
+        doctor_camera_view_->clearFrame();
+    }
 }
 
 void SignController::capturePreviewFrames(int cameraId, int width, int height)
@@ -512,6 +574,7 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
             this,
             [this, device_path]() {
                 appendLog(QStringLiteral("Qt QML camera preview open failed: %1").arg(device_path));
+                setStatus(QStringLiteral("错误"));
                 stopLocalPreview();
             },
             Qt::QueuedConnection);
@@ -522,6 +585,19 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, height);
     cap.set(cv::CAP_PROP_FPS, 30);
     cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
+    // ========== 切换自动曝光（画面自动明暗调节）==========
+    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
+
+    // ========== 切换手动曝光（固定亮度，不会忽亮忽暗）==========
+    // cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
+    // cap.set(cv::CAP_PROP_EXPOSURE, 400);
+    // cap.set(cv::CAP_PROP_GAIN, 0);
+    QMetaObject::invokeMethod(
+        this,
+        [this, exposure = cap.get(cv::CAP_PROP_EXPOSURE), gain = cap.get(cv::CAP_PROP_GAIN)]() {
+            appendLog(QStringLiteral("Qt camera exposure=%1 gain=%2").arg(exposure).arg(gain));
+        },
+        Qt::QueuedConnection);
 
     auto last_worker_encode_time = std::chrono::steady_clock::now() - std::chrono::milliseconds(100);
 
@@ -533,32 +609,89 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
         }
         capture_frames_.fetch_add(1, std::memory_order_relaxed);
 
-        if (camera_view_ && !preview_update_pending_.exchange(true)) {
-            cv::Mat display = frame.clone();
+        if ((camera_view_ || doctor_camera_view_) && !preview_update_pending_.exchange(true)) {
+            cv::Mat base_display = frame.clone();
             const int preview_width = 960;
-            if (display.cols > preview_width) {
-                const int preview_height = std::max(1, display.rows * preview_width / display.cols);
-                cv::resize(display, display, cv::Size(preview_width, preview_height), 0, 0, cv::INTER_AREA);
+            if (base_display.cols > preview_width) {
+                const int preview_height = std::max(1, base_display.rows * preview_width / base_display.cols);
+                cv::resize(base_display, base_display, cv::Size(preview_width, preview_height), 0, 0, cv::INTER_AREA);
             }
-            const int x1 = static_cast<int>(display.cols * 0.15);
-            const int x2 = static_cast<int>(display.cols * 0.85);
-            cv::rectangle(display, cv::Point(x1, 0), cv::Point(x2, display.rows - 1), cv::Scalar(255, 255, 0), 3);
 
-            cv::Mat rgb;
-            cv::cvtColor(display, rgb, cv::COLOR_BGR2RGB);
-            QImage image(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step), QImage::Format_RGB888);
-            const QImage frame_image = image.copy();
+            cv::Mat patient_display = base_display.clone();
+            const int guide_x1 = static_cast<int>(patient_display.cols * 0.15);
+            const int guide_x2 = static_cast<int>(patient_display.cols * 0.85);
+            cv::rectangle(
+                patient_display,
+                cv::Point(guide_x1, 0),
+                cv::Point(guide_x2, patient_display.rows - 1),
+                cv::Scalar(255, 255, 0),
+                3);
+
+            cv::Mat doctor_display = base_display.clone();
+            bool has_dynamic_roi = false;
+            double dynamic_roi[4] = {0.15, 0.0, 0.85, 1.0};
+            {
+                std::lock_guard<std::mutex> lock(preview_mutex_);
+                has_dynamic_roi = has_dynamic_roi_;
+                std::copy(std::begin(dynamic_roi_), std::end(dynamic_roi_), std::begin(dynamic_roi));
+            }
+            const auto drawNormBox = [&doctor_display](const double* box, const cv::Scalar& color, int thickness) {
+                const int x1 = static_cast<int>(doctor_display.cols * box[0]);
+                const int y1 = static_cast<int>(doctor_display.rows * box[1]);
+                const int x2 = static_cast<int>(doctor_display.cols * box[2]);
+                const int y2 = static_cast<int>(doctor_display.rows * box[3]);
+                cv::rectangle(doctor_display, cv::Point(x1, y1), cv::Point(x2, y2), color, thickness);
+            };
+            if (has_dynamic_roi) {
+                drawNormBox(dynamic_roi, cv::Scalar(255, 0, 0), 3);
+            } else {
+                cv::rectangle(
+                    doctor_display,
+                    cv::Point(guide_x1, 0),
+                    cv::Point(guide_x2, doctor_display.rows - 1),
+                    cv::Scalar(255, 255, 0),
+                    2);
+            }
+            cv::Mat patient_rgb;
+            cv::cvtColor(patient_display, patient_rgb, cv::COLOR_BGR2RGB);
+            QImage patient_image(
+                patient_rgb.data,
+                patient_rgb.cols,
+                patient_rgb.rows,
+                static_cast<int>(patient_rgb.step),
+                QImage::Format_RGB888);
+            const QImage patient_frame_image = patient_image.copy();
+
+            cv::Mat doctor_rgb;
+            cv::cvtColor(doctor_display, doctor_rgb, cv::COLOR_BGR2RGB);
+            QImage doctor_image(
+                doctor_rgb.data,
+                doctor_rgb.cols,
+                doctor_rgb.rows,
+                static_cast<int>(doctor_rgb.step),
+                QImage::Format_RGB888);
+            const QImage doctor_frame_image = doctor_image.copy();
+
             QMetaObject::invokeMethod(
-                camera_view_,
-                [this, view = camera_view_, frame_image]() {
-                    if (view) {
-                        view->setFrame(frame_image);
+                this,
+                [this,
+                 patient_view = camera_view_,
+                 doctor_view = doctor_camera_view_,
+                 patient_frame_image,
+                 doctor_frame_image]() {
+                    if (local_preview_active_) {
+                        if (patient_view) {
+                            patient_view->setFrame(patient_frame_image);
+                        }
+                        if (doctor_view) {
+                            doctor_view->setFrame(doctor_frame_image);
+                        }
                     }
                     preview_update_pending_.store(false);
                 },
                 Qt::QueuedConnection);
             preview_delivered_.fetch_add(1, std::memory_order_relaxed);
-        } else if (camera_view_) {
+        } else if (camera_view_ || doctor_camera_view_) {
             preview_dropped_.fetch_add(1, std::memory_order_relaxed);
         }
 
@@ -570,7 +703,7 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
             last_worker_encode_time = now;
 
             cv::Mat send_frame = frame;
-            const int recognition_width = 640;
+            const int recognition_width = 1280;
             if (send_frame.cols > recognition_width) {
                 const int recognition_height = std::max(1, send_frame.rows * recognition_width / send_frame.cols);
                 cv::Mat resized;
@@ -625,16 +758,22 @@ QString SignController::projectPath(const QString& relativePath) const
 
 QStringList SignController::workerArguments() const
 {
+    const QString modelPath = qEnvironmentVariable(
+        "SIGN_TCN_MODEL",
+        "artifacts/models/sign_tcn_best.rknn");
+    const QString featureMode = qEnvironmentVariable("SIGN_FEATURE_MODE", "full");
+
     return {
         projectPath(QStringLiteral("scripts/infer/infer_realtime_rknn.py")),
-        QStringLiteral("--model"), QStringLiteral("artifacts/models/sign_tcn_best.rknn"),
+        QStringLiteral("--model"), modelPath,
         QStringLiteral("--labels"), QStringLiteral("label_map.json"),
+        QStringLiteral("--feature-mode"), featureMode,
         QStringLiteral("--camera"), QStringLiteral("21"),
         QStringLiteral("--width"), QStringLiteral("1280"),
         QStringLiteral("--height"), QStringLiteral("720"),
         QStringLiteral("--pose-interval"), QStringLiteral("4"),
         QStringLiteral("--hand-interval"), QStringLiteral("2"),
-        QStringLiteral("--json-interval"), QStringLiteral("0.2"),
+        QStringLiteral("--json-interval"), QStringLiteral("0.05"),
         QStringLiteral("--frame-stdin"),
         QStringLiteral("--composer"), QStringLiteral("rkllm"),
         QStringLiteral("--rkllm-url"), QStringLiteral("http://127.0.0.1:8080/rkllm_chat"),

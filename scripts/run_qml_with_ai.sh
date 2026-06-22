@@ -13,6 +13,8 @@ RKLLM_PORT="${RKLLM_PORT:-8080}"
 DISPLAY="${DISPLAY:-:0.0}"
 QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
 QSG_RENDER_LOOP="${QSG_RENDER_LOOP:-basic}"
+DSI_BACKLIGHT_PATH="${DSI_BACKLIGHT_PATH:-/sys/class/backlight/backlight-dsi0/brightness}"
+DSI_BRIGHTNESS="${DSI_BRIGHTNESS:-250}"
 
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/artifacts/logs}"
 RKLLM_LOG="$LOG_DIR/rkllm_server.log"
@@ -63,6 +65,22 @@ wait_for_rkllm() {
     return 1
 }
 
+set_dsi_brightness() {
+    if [[ ! -e "$DSI_BACKLIGHT_PATH" ]]; then
+        echo "[run] DSI backlight path not found: $DSI_BACKLIGHT_PATH"
+        return 0
+    fi
+
+    echo "[run] setting DSI brightness: $DSI_BRIGHTNESS"
+    if [[ -w "$DSI_BACKLIGHT_PATH" ]]; then
+        printf '%s\n' "$DSI_BRIGHTNESS" >"$DSI_BACKLIGHT_PATH" || true
+    elif command -v sudo >/dev/null 2>&1; then
+        printf '%s\n' "$DSI_BRIGHTNESS" | sudo tee "$DSI_BACKLIGHT_PATH" >/dev/null || true
+    else
+        echo "[run] cannot set DSI brightness without write permission or sudo"
+    fi
+}
+
 if [[ ! -x "$QML_APP" ]]; then
     echo "[run] QML app not found, building SignLanguageQml ..."
     cmake -S "$ROOT_DIR" -B "$BUILD_DIR"
@@ -78,6 +96,8 @@ if [[ ! -f "$RKLLM_SERVER_DIR/flask_server.py" ]]; then
     echo "[run] rkllm flask server not found: $RKLLM_SERVER_DIR/flask_server.py" >&2
     exit 1
 fi
+
+set_dsi_brightness
 
 if port_open; then
     echo "[run] rkllm server already running at http://$RKLLM_HOST:$RKLLM_PORT"

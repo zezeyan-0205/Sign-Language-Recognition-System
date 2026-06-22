@@ -1,8 +1,24 @@
 <RCC>
     <qresource prefix="/">
         <file>qml/main.qml</file>
+        <file>qml/Theme.qml</file>
         <file>qml/BigButton.qml</file>
+        <file>qml/SidebarIconButton.qml</file>
+        <file>qml/MedicalCard.qml</file>
+        <file>qml/MedicalButton.qml</file>
+        <file>qml/MedicalProgressBar.qml</file>
+        <file>qml/StatusBanner.qml</file>
+        <file>qml/StatusPill.qml</file>
+        <file>qml/DoctorSettingsDialog.qml</file>
         <file>qml/MetricBox.qml</file>
         <file>qml/RecordCard.qml</file>
+        <file>qml/icons/nav_home.svg</file>
+        <file>qml/icons/nav_doctor.svg</file>
+        <file>qml/icons/nav_record.svg</file>
+        <file>qml/icons/nav_sign.svg</file>
+        <file>qml/icons/nav_sync.svg</file>
+        <file>qml/icons/nav_split.svg</file>
+        <file>qml/icons/nav_settings.svg</file>
+        <file>qml/icons/nav_power.svg</file>
     </qresource>
 </RCC>

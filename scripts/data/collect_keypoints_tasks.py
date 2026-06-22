@@ -7,7 +7,7 @@ import mediapipe as mp
 
 
 DEFAULT_SEQ_LEN = 30
-COUNTDOWN_SEC = 3
+COUNTDOWN_SEC = 1
 DEFAULT_RECORD_SEC = 1.5
 
 POSE_DIM = 33 * 4
@@ -286,6 +286,16 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     cap.set(cv2.CAP_PROP_FPS, 30)
+
+
+    # 关闭自动曝光
+    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+
+    # 调低曝光，数值越小通常越暗
+    cap.set(cv2.CAP_PROP_EXPOSURE, 200)
+
+    # 可选：降低增益，避免画面又亮又糊
+    cap.set(cv2.CAP_PROP_GAIN, 0)
 
     pose_options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=args.pose_model),

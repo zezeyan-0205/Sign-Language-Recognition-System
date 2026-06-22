@@ -58,11 +58,41 @@ ROI_Y_MAX = 1
 POSE_DIM = 33 * 4
 HAND_DIM = 21 * 3
 
+# -------------------------- 完整人体动态 ROI 参数 --------------------------
+# MediaPipe Pose 坐标是归一化坐标，所以这里的宽高比例都是 0~1。
+MIN_POSE_CONFIDENCE = 0.30
+POSE_TARGET_MAX_POSES = 4
+POSE_TARGET_CENTER_WEIGHT = 1.2
+POSE_TARGET_AREA_WEIGHT = 1.0
+POSE_TARGET_CONF_WEIGHT = 0.8
+
+BODY_ROI_EXPAND_X = 0.12
+BODY_ROI_EXPAND_TOP = 0.08
+BODY_ROI_EXPAND_BOTTOM = 0.10
+MIN_BODY_ROI_WIDTH_RATIO = 0.22
+MIN_BODY_ROI_HEIGHT_RATIO = 0.25
+MAX_BODY_ROI_WIDTH_RATIO = 0.90
+MAX_BODY_ROI_HEIGHT_RATIO = 0.98
+
+HAND_TARGET_MAX_HANDS = 2
+HAND_WRIST_DISTANCE_SCALE = 1.2
+HAND_BODY_CENTER_DISTANCE_SCALE = 1.35
+HAND_PREVIOUS_CENTER_DISTANCE = 0.18
+
+ROI_ALPHA_EXPAND = 0.75
+ROI_ALPHA_SHRINK = 0.35
+ROI_HAND_HOLD_FRAMES = 4
+
+ROI_MODE_BODY_ONLY = "BODY_ONLY"
+ROI_MODE_BODY_HAND = "BODY_HAND"
+ROI_MODE_POSE_LOST = "POSE_LOST"
+
 # 预测稳定参数
-CONF_THRESHOLD = 0.70      # 低于这个置信度，显示“识别中...”
+CONF_THRESHOLD = 0.60      # 低于这个置信度，显示“识别中...”
 SMOOTH_WINDOW = 6          # 最近8次预测做投票
 MIN_VOTE_COUNT = 3         # 至少4票一致才更新显示
 TOKEN_ADD_INTERVAL = 0.8
+DELETE_READD_GRACE = 0.35
 # ================= MediaPipe =================
 BaseOptions = mp.tasks.BaseOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
@@ -372,27 +402,392 @@ def draw_progress_bar(frame, current, total, bar_x, bar_y, bar_w, bar_h):
 
 
 def hand_in_center_roi(landmarks):
-    xs = [lm.x for lm in landmarks]
-    ys = [lm.y for lm in landmarks]
-
-    cx = sum(xs) / len(xs)
-    cy = sum(ys) / len(ys)
-
+    cx, cy = hand_center(landmarks)
     return ROI_X_MIN <= cx <= ROI_X_MAX and ROI_Y_MIN <= cy <= ROI_Y_MAX
 
 
-def extract_pose(pose_result):
-    if not pose_result.pose_landmarks:
+def hand_center(landmarks):
+    xs = [lm.x for lm in landmarks]
+    ys = [lm.y for lm in landmarks]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def clamp(value, low=0.0, high=1.0):
+    return max(low, min(high, value))
+
+
+def complete_bbox(x1, y1, x2, y2, clamp_to_roi=True):
+    if clamp_to_roi:
+        x1 = clamp(x1, ROI_X_MIN, ROI_X_MAX)
+        x2 = clamp(x2, ROI_X_MIN, ROI_X_MAX)
+        y1 = clamp(y1, ROI_Y_MIN, ROI_Y_MAX)
+        y2 = clamp(y2, ROI_Y_MIN, ROI_Y_MAX)
+    else:
+        x1 = clamp(x1)
+        x2 = clamp(x2)
+        y1 = clamp(y1)
+        y2 = clamp(y2)
+
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    return {
+        "x_min": x1,
+        "y_min": y1,
+        "x_max": x2,
+        "y_max": y2,
+        "width": max(1e-6, x2 - x1),
+        "height": max(1e-6, y2 - y1),
+        "cx": (x1 + x2) / 2.0,
+        "cy": (y1 + y2) / 2.0,
+    }
+
+
+def union_bboxes(*boxes):
+    valid = [box for box in boxes if box is not None]
+    if not valid:
+        return None
+    return complete_bbox(
+        min(box["x_min"] for box in valid),
+        min(box["y_min"] for box in valid),
+        max(box["x_max"] for box in valid),
+        max(box["y_max"] for box in valid),
+    )
+
+
+def expand_bbox(box, expand_x, expand_top, expand_bottom):
+    if box is None:
+        return None
+    return complete_bbox(
+        box["x_min"] - box["width"] * expand_x,
+        box["y_min"] - box["height"] * expand_top,
+        box["x_max"] + box["width"] * expand_x,
+        box["y_max"] + box["height"] * expand_bottom,
+    )
+
+
+def enforce_bbox_size(box, min_w, min_h, max_w, max_h):
+    if box is None:
+        return None
+
+    width = min(max(box["width"], min_w), max_w)
+    height = min(max(box["height"], min_h), max_h)
+    cx = clamp(box["cx"], ROI_X_MIN, ROI_X_MAX)
+    cy = clamp(box["cy"], ROI_Y_MIN, ROI_Y_MAX)
+    x1 = cx - width / 2.0
+    x2 = cx + width / 2.0
+    y1 = cy - height / 2.0
+    y2 = cy + height / 2.0
+
+    if x1 < ROI_X_MIN:
+        x2 += ROI_X_MIN - x1
+        x1 = ROI_X_MIN
+    if x2 > ROI_X_MAX:
+        x1 -= x2 - ROI_X_MAX
+        x2 = ROI_X_MAX
+    if y1 < ROI_Y_MIN:
+        y2 += ROI_Y_MIN - y1
+        y1 = ROI_Y_MIN
+    if y2 > ROI_Y_MAX:
+        y1 -= y2 - ROI_Y_MAX
+        y2 = ROI_Y_MAX
+
+    return complete_bbox(x1, y1, x2, y2)
+
+
+def bbox_area(box):
+    return box["width"] * box["height"] if box is not None else 0.0
+
+
+def lerp_bbox(current, target, alpha):
+    if current is None:
+        return target
+    if target is None:
+        return current
+    return complete_bbox(
+        current["x_min"] * (1.0 - alpha) + target["x_min"] * alpha,
+        current["y_min"] * (1.0 - alpha) + target["y_min"] * alpha,
+        current["x_max"] * (1.0 - alpha) + target["x_max"] * alpha,
+        current["y_max"] * (1.0 - alpha) + target["y_max"] * alpha,
+    )
+
+
+def point_in_bbox(point, box):
+    if point is None or box is None:
+        return False
+    return box["x_min"] <= point[0] <= box["x_max"] and box["y_min"] <= point[1] <= box["y_max"]
+
+
+def visible_pose_point(pose, index):
+    if pose is None or index >= len(pose):
+        return None
+    lm = pose[index]
+    if getattr(lm, "visibility", 0.0) < MIN_POSE_CONFIDENCE:
+        return None
+    return np.array([lm.x, lm.y], dtype=np.float32)
+
+
+def collect_visible_pose_points(pose, indices):
+    points = []
+    for index in indices:
+        point = visible_pose_point(pose, index)
+        if point is not None:
+            points.append(point)
+    return points
+
+
+def bbox_from_points(points, clamp_to_roi=True):
+    if not points:
+        return None
+    arr = np.vstack(points)
+    return complete_bbox(
+        float(np.min(arr[:, 0])),
+        float(np.min(arr[:, 1])),
+        float(np.max(arr[:, 0])),
+        float(np.max(arr[:, 1])),
+        clamp_to_roi=clamp_to_roi,
+    )
+
+
+BODY_BBOX_POSE_INDICES = (
+    0, 2, 5, 7, 8,
+    11, 12, 13, 14, 15, 16,
+    23, 24, 25, 26, 27, 28,
+)
+LOWER_BODY_POSE_INDICES = (25, 26, 27, 28)
+
+
+def estimate_full_body_bbox_from_upper_body(pose):
+    left_shoulder = visible_pose_point(pose, 11)
+    right_shoulder = visible_pose_point(pose, 12)
+    if left_shoulder is None or right_shoulder is None:
+        return None
+
+    shoulder_center = (left_shoulder + right_shoulder) / 2.0
+    shoulder_width = float(np.linalg.norm(left_shoulder - right_shoulder))
+    if shoulder_width < 1e-6:
+        return None
+
+    left_hip = visible_pose_point(pose, 23)
+    right_hip = visible_pose_point(pose, 24)
+    nose = visible_pose_point(pose, 0)
+    top_from_head = float(nose[1] - shoulder_width * 0.6) if nose is not None else float(shoulder_center[1] - shoulder_width * 1.2)
+
+    if left_hip is not None and right_hip is not None:
+        hip_center = (left_hip + right_hip) / 2.0
+        torso_height = max(float(hip_center[1] - shoulder_center[1]), shoulder_width * 0.8)
+        top = min(top_from_head, float(shoulder_center[1] - shoulder_width * 1.0))
+        bottom = float(hip_center[1] + torso_height * 1.8)
+        center_x = float((shoulder_center[0] + hip_center[0]) / 2.0)
+    else:
+        top = float(shoulder_center[1] - shoulder_width * 1.2)
+        bottom = float(shoulder_center[1] + shoulder_width * 4.0)
+        center_x = float(shoulder_center[0])
+
+    half_width = shoulder_width * 1.6
+    return complete_bbox(center_x - half_width, top, center_x + half_width, bottom, clamp_to_roi=False)
+
+
+def compute_full_body_bbox_from_pose(target_pose):
+    pose_points = collect_visible_pose_points(target_pose, BODY_BBOX_POSE_INDICES)
+    direct_bbox = bbox_from_points(pose_points, clamp_to_roi=False)
+    estimated_bbox = estimate_full_body_bbox_from_upper_body(target_pose) if direct_bbox is None else None
+    person_bbox = direct_bbox if direct_bbox is not None else estimated_bbox
+
+    if person_bbox is None:
+        return None
+
+    # person_bbox 贴合当前可见骨骼点；只做轻微扩展，让 ROI 不再覆盖大半个画面。
+    body_roi = expand_bbox(person_bbox, BODY_ROI_EXPAND_X, BODY_ROI_EXPAND_TOP, BODY_ROI_EXPAND_BOTTOM)
+    body_roi = enforce_bbox_size(
+        body_roi,
+        MIN_BODY_ROI_WIDTH_RATIO,
+        MIN_BODY_ROI_HEIGHT_RATIO,
+        MAX_BODY_ROI_WIDTH_RATIO,
+        MAX_BODY_ROI_HEIGHT_RATIO,
+    )
+    return person_bbox, body_roi
+
+
+def pose_confidence(pose):
+    visible = [getattr(lm, "visibility", 0.0) for lm in pose]
+    return float(np.mean(visible)) if visible else 0.0
+
+
+def select_target_pose(pose_result):
+    if pose_result is None or not pose_result.pose_landmarks:
+        return None, None, None
+
+    roi_cx = (ROI_X_MIN + ROI_X_MAX) / 2.0
+    roi_cy = (ROI_Y_MIN + ROI_Y_MAX) / 2.0
+    best_pose = None
+    best_person_bbox = None
+    best_body_roi = None
+    best_score = -1e9
+
+    for pose in pose_result.pose_landmarks:
+        computed = compute_full_body_bbox_from_pose(pose)
+        if computed is None:
+            continue
+        person_bbox, body_roi = computed
+        if not point_in_bbox((person_bbox["cx"], person_bbox["cy"]), {
+            "x_min": ROI_X_MIN,
+            "x_max": ROI_X_MAX,
+            "y_min": ROI_Y_MIN,
+            "y_max": ROI_Y_MAX,
+        }):
+            continue
+
+        center_distance = float(np.hypot(person_bbox["cx"] - roi_cx, person_bbox["cy"] - roi_cy))
+        center_score = 1.0 - min(1.0, center_distance / 0.75)
+        area_score = min(1.0, bbox_area(person_bbox) / 0.55)
+        score = (
+            center_score * POSE_TARGET_CENTER_WEIGHT +
+            area_score * POSE_TARGET_AREA_WEIGHT +
+            pose_confidence(pose) * POSE_TARGET_CONF_WEIGHT
+        )
+        if score > best_score:
+            best_pose = pose
+            best_person_bbox = person_bbox
+            best_body_roi = body_roi
+            best_score = score
+
+    return best_pose, best_person_bbox, best_body_roi
+
+
+def hand_bbox(landmarks):
+    return bbox_from_points([np.array([lm.x, lm.y], dtype=np.float32) for lm in landmarks])
+
+
+def hand_match_to_target_pose(landmarks, target_pose, body_roi, previous_centers):
+    if target_pose is None or body_roi is None:
+        return False, 1e9
+
+    center = hand_center(landmarks)
+    hand_point = np.array(center, dtype=np.float32)
+    wrist_distances = []
+    for index in (15, 16):
+        wrist = visible_pose_point(target_pose, index)
+        if wrist is not None:
+            wrist_distances.append(float(np.linalg.norm(hand_point - wrist)))
+    if wrist_distances:
+        min_wrist_distance = min(wrist_distances)
+        threshold = max(body_roi["width"], body_roi["height"]) * 0.18 * HAND_WRIST_DISTANCE_SCALE
+        if min_wrist_distance <= threshold:
+            return True, min_wrist_distance
+
+    body_center = np.array([body_roi["cx"], body_roi["cy"]], dtype=np.float32)
+    body_distance = float(np.linalg.norm(hand_point - body_center))
+    search_roi = expand_bbox(body_roi, 0.18, 0.12, 0.10)
+    if point_in_bbox(center, search_roi) and body_distance <= max(body_roi["width"], body_roi["height"]) * HAND_BODY_CENTER_DISTANCE_SCALE:
+        return True, body_distance
+
+    for prev_center in previous_centers:
+        if float(np.linalg.norm(hand_point - np.array(prev_center, dtype=np.float32))) <= HAND_PREVIOUS_CENTER_DISTANCE:
+            return True, body_distance
+
+    return False, 1e9
+
+
+class DynamicRoiTracker:
+    def __init__(self):
+        self.roi = None
+        self.mode = ROI_MODE_POSE_LOST
+        self.missed_hand_frames = 0
+        self.previous_hand_centers = []
+
+    def update(self, person_bbox, body_roi, valid_hands):
+        if body_roi is None:
+            self.roi = None
+            self.mode = ROI_MODE_POSE_LOST
+            self.previous_hand_centers = []
+            self.missed_hand_frames += 1
+            return None, self.mode
+
+        target_roi = body_roi
+        if valid_hands:
+            hand_boxes = [hand_bbox(hand) for hand in valid_hands]
+            target_roi = union_bboxes(person_bbox, body_roi, *hand_boxes)
+            target_roi = enforce_bbox_size(
+                target_roi,
+                MIN_BODY_ROI_WIDTH_RATIO,
+                MIN_BODY_ROI_HEIGHT_RATIO,
+                MAX_BODY_ROI_WIDTH_RATIO,
+                MAX_BODY_ROI_HEIGHT_RATIO,
+            )
+            self.mode = ROI_MODE_BODY_HAND
+            self.missed_hand_frames = 0
+            self.previous_hand_centers = [hand_center(hand) for hand in valid_hands]
+        else:
+            self.missed_hand_frames += 1
+            if self.missed_hand_frames >= ROI_HAND_HOLD_FRAMES:
+                self.mode = ROI_MODE_BODY_ONLY
+                self.previous_hand_centers = []
+
+        if self.roi is None:
+            self.roi = target_roi
+        else:
+            alpha = ROI_ALPHA_EXPAND if bbox_area(target_roi) > bbox_area(self.roi) else ROI_ALPHA_SHRINK
+            self.roi = lerp_bbox(self.roi, target_roi, alpha)
+            if valid_hands:
+                self.roi = union_bboxes(self.roi, *[hand_bbox(hand) for hand in valid_hands])
+
+        if self.mode == ROI_MODE_POSE_LOST:
+            self.mode = ROI_MODE_BODY_ONLY
+        return self.roi, self.mode
+
+
+def extract_pose(target_pose):
+    if target_pose is None:
         return np.zeros(POSE_DIM, dtype=np.float32)
 
     data = []
-    for lm in pose_result.pose_landmarks[0]:
+    for lm in target_pose:
         data.extend([lm.x, lm.y, lm.z, lm.visibility])
 
     return np.array(data, dtype=np.float32)
 
 
-def extract_hands(hand_result):
+def extract_hands(hand_result, target_pose, body_roi, dynamic_roi_tracker):
+    left_hand = np.zeros(HAND_DIM, dtype=np.float32)
+    right_hand = np.zeros(HAND_DIM, dtype=np.float32)
+    debug_hands = []
+    valid_candidates = []
+
+    if hand_result is not None and hand_result.hand_landmarks:
+        for idx, landmarks in enumerate(hand_result.hand_landmarks):
+            center = hand_center(landmarks)
+            debug_item = {"center": center, "landmarks": landmarks, "valid": False}
+            debug_hands.append(debug_item)
+
+            if not hand_in_center_roi(landmarks):
+                continue
+
+            matched, distance = hand_match_to_target_pose(
+                landmarks,
+                target_pose,
+                body_roi,
+                dynamic_roi_tracker.previous_hand_centers,
+            )
+            if not matched:
+                continue
+
+            handedness = ""
+            if idx < len(hand_result.handedness) and hand_result.handedness[idx]:
+                handedness = hand_result.handedness[idx][0].category_name
+            valid_candidates.append({
+                "landmarks": landmarks,
+                "handedness": handedness,
+                "distance": distance,
+                "debug": debug_item,
+            })
+
+    return left_hand, right_hand, valid_candidates, debug_hands
+
+
+def extract_original_hands(hand_result):
     left_hand = np.zeros(HAND_DIM, dtype=np.float32)
     right_hand = np.zeros(HAND_DIM, dtype=np.float32)
 
@@ -404,11 +799,9 @@ def extract_hands(hand_result):
             continue
 
         handedness = hand_result.handedness[idx][0].category_name
-
         data = []
         for lm in landmarks:
             data.extend([lm.x, lm.y, lm.z])
-
         data = np.array(data, dtype=np.float32)
 
         if handedness == "Left":
@@ -417,6 +810,39 @@ def extract_hands(hand_result):
             right_hand = data
 
     return left_hand, right_hand
+
+
+def fill_hands_from_candidates(candidates, dynamic_roi):
+    left_hand = np.zeros(HAND_DIM, dtype=np.float32)
+    right_hand = np.zeros(HAND_DIM, dtype=np.float32)
+    kept = []
+
+    filtered = []
+    for item in candidates:
+        center = item["debug"]["center"]
+        if dynamic_roi is not None and not point_in_bbox(center, dynamic_roi):
+            continue
+        filtered.append(item)
+
+    filtered.sort(key=lambda item: item["distance"])
+    for item in filtered[:2]:
+        data = []
+        for lm in item["landmarks"]:
+            data.extend([lm.x, lm.y, lm.z])
+        data = np.array(data, dtype=np.float32)
+        item["debug"]["valid"] = True
+        kept.append(item["landmarks"])
+
+        if item["handedness"] == "Left" and not np.any(left_hand != 0):
+            left_hand = data
+        elif item["handedness"] == "Right" and not np.any(right_hand != 0):
+            right_hand = data
+        elif not np.any(left_hand != 0):
+            left_hand = data
+        elif not np.any(right_hand != 0):
+            right_hand = data
+
+    return left_hand, right_hand, kept
 
 def has_valid_hand(keypoints):
     left = keypoints[POSE_DIM:POSE_DIM + HAND_DIM]
@@ -463,19 +889,76 @@ def resample_sequence(seq, target_len=SEQ_LEN):
 
 
 
-def extract_keypoints(pose_result, hand_result):
-    pose = extract_pose(pose_result)
-    left_hand, right_hand = extract_hands(hand_result)
-    return np.concatenate([pose, left_hand, right_hand]).astype(np.float32)
+def extract_keypoints(pose_result, hand_result, dynamic_roi_tracker):
+    target_pose, person_bbox, body_roi = select_target_pose(pose_result)
+    # 识别输入尽量保持和原始版本一致：TCN 使用 MediaPipe 返回的第一组 pose。
+    # target_pose / dynamic ROI 只给医生端调试框使用，暂不参与关键点特征过滤。
+    original_pose = pose_result.pose_landmarks[0] if pose_result and pose_result.pose_landmarks else None
+    pose = extract_pose(original_pose)
+    original_left_hand, original_right_hand = extract_original_hands(hand_result)
+    _, _, candidates, debug_hands = extract_hands(hand_result, target_pose, body_roi, dynamic_roi_tracker)
+    dynamic_roi, roi_mode = dynamic_roi_tracker.update(
+        person_bbox,
+        body_roi,
+        [item["landmarks"] for item in candidates],
+    )
+    # 动态 ROI 暂时只用于医生端调试显示，不参与识别过滤。
+    # 识别仍走原来的中心 ROI 手部逻辑，方便对比精度是否恢复。
+    left_hand, right_hand = original_left_hand, original_right_hand
+    kept_hands = []
+    debug = {
+        "target_pose": target_pose,
+        "person_bbox": person_bbox,
+        "body_roi": body_roi,
+        "dynamic_roi": dynamic_roi,
+        "roi_mode": roi_mode,
+        "hands": debug_hands,
+        "valid_hands": len(kept_hands),
+    }
+    return np.concatenate([pose, left_hand, right_hand]).astype(np.float32), debug
 
 
-def draw_roi(frame):
+def draw_box(frame, box, color, thickness=2):
+    if box is None:
+        return
+    h, w = frame.shape[:2]
+    x1 = int(box["x_min"] * w)
+    y1 = int(box["y_min"] * h)
+    x2 = int(box["x_max"] * w)
+    y2 = int(box["y_max"] * h)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+
+
+def draw_roi(frame, debug=None):
     h, w = frame.shape[:2]
     x1 = int(ROI_X_MIN * w)
     y1 = int(ROI_Y_MIN * h)
     x2 = int(ROI_X_MAX * w)
     y2 = int(ROI_Y_MAX * h)
     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+    if not debug:
+        return
+
+    draw_box(frame, debug.get("person_bbox"), (0, 180, 0), 1)
+    draw_box(frame, debug.get("body_roi"), (255, 190, 80), 2)
+    draw_box(frame, debug.get("dynamic_roi"), (255, 0, 0), 3)
+    for hand in debug.get("hands", []):
+        landmarks = hand.get("landmarks")
+        if not landmarks:
+            continue
+        color = (0, 220, 0) if hand.get("valid") else (120, 120, 120)
+        for lm in landmarks[::4]:
+            cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 2, color, -1)
+
+    cv2.putText(
+        frame,
+        f"{debug.get('roi_mode', ROI_MODE_POSE_LOST)} valid_hands={debug.get('valid_hands', 0)}",
+        (20, max(24, h - 20)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2,
+    )
 
 
 def update_ema(previous, value, alpha=0.15):
@@ -583,13 +1066,13 @@ def main():
     pose_options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=POSE_MODEL),
         running_mode=VisionRunningMode.VIDEO,
-        num_poses=1,
+        num_poses=POSE_TARGET_MAX_POSES,
     )
 
     hand_options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=HAND_MODEL),
         running_mode=VisionRunningMode.VIDEO,
-        num_hands=2,
+        num_hands=HAND_TARGET_MAX_HANDS,
     )
 
     # 按时间缓存，而不是按固定帧数缓存。每项为 (timestamp, keypoints)
@@ -605,6 +1088,8 @@ def main():
     token_buffer = []
     last_added_token = ""
     last_added_time = 0.0
+    deleted_token = ""
+    deleted_until = 0.0
     last_sentence = ""
     last_sentence_source = ""
     last_valid_hand_time = 0.0
@@ -644,6 +1129,8 @@ def main():
     last_frame_id = 0
     last_pose_result = None
     last_hand_result = None
+    dynamic_roi_tracker = DynamicRoiTracker()
+    tracking_debug = {}
 
     with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
          HandLandmarker.create_from_options(hand_options) as hand_landmarker:
@@ -660,6 +1147,8 @@ def main():
                     token_buffer = []
                     last_added_token = ""
                     last_added_time = 0.0
+                    deleted_token = ""
+                    deleted_until = 0.0
                     last_sentence = ""
                     last_sentence_source = ""
                     emit_json("recording", active=True, tokens=token_buffer)
@@ -683,15 +1172,19 @@ def main():
                     token_buffer = []
                     last_added_token = ""
                     last_added_time = 0.0
+                    deleted_token = ""
+                    deleted_until = 0.0
                     last_sentence = ""
                     last_sentence_source = ""
                     emit_json("recording", active=False, tokens=token_buffer)
                     emit_json("sentence", tokens=token_buffer, sentence=last_sentence, composer=last_sentence_source)
                 elif cmd == "delete_last":
                     removed_token = token_buffer.pop() if token_buffer else ""
-                    # 避免用户刚删掉一个错词后，同一手势被下一帧立刻重新加入。
-                    last_added_token = removed_token
-                    last_added_time = time.time() if removed_token else 0.0
+                    # 删除后只短暂防抖，允许用户重新做同一个词。
+                    deleted_token = removed_token
+                    deleted_until = time.time() + DELETE_READD_GRACE if removed_token else 0.0
+                    last_added_token = token_buffer[-1] if token_buffer else ""
+                    last_added_time = 0.0
                     last_sentence = ""
                     last_sentence_source = ""
                     emit_json("tokens", tokens=token_buffer)
@@ -748,7 +1241,9 @@ def main():
 
             rgb.flags.writeable = True
 
-            keypoints = extract_keypoints(last_pose_result, last_hand_result)
+            keypoints, tracking_debug = extract_keypoints(last_pose_result, last_hand_result, dynamic_roi_tracker)
+            target_pose_valid = tracking_debug.get("target_pose") is not None
+            valid_hand_count = int(tracking_debug.get("valid_hands", 0))
 
             hands_valid = has_valid_hand(keypoints)
             if hands_valid:
@@ -764,6 +1259,13 @@ def main():
                     pred_history.clear()
                     display_pred = "等待中..."
                     display_conf = 0.0
+            if not target_pose_valid:
+                display_pred = "请患者站在识别框内"
+                display_conf = 0.0
+                pred_history.clear()
+            elif valid_hand_count == 0 and not hands_valid:
+                display_pred = "等待手部进入识别区"
+                display_conf = 0.0
 
             # 只保留最近 WINDOW_SEC 秒的数据
             while sequence and now - sequence[0][0] > WINDOW_SEC:
@@ -829,17 +1331,34 @@ def main():
 
             if (
                 recording and
-                display_pred not in ("等待中...", "识别中...") and
+                display_pred not in ("等待中...", "识别中...", "请患者站在识别框内", "等待手部进入识别区") and
                 display_conf >= CONF_THRESHOLD and
                 display_pred != last_added_token and
+                not (display_pred == deleted_token and now < deleted_until) and
                 now - last_added_time >= TOKEN_ADD_INTERVAL
             ):
                 token_buffer.append(display_pred)
                 last_added_token = display_pred
                 last_added_time = now
+                if display_pred == deleted_token:
+                    deleted_token = ""
+                    deleted_until = 0.0
                 emit_json("tokens", tokens=token_buffer)
 
             if args.json_output and now - last_json_time >= args.json_interval:
+                dynamic_roi = tracking_debug.get("dynamic_roi")
+                body_roi = tracking_debug.get("body_roi")
+                person_bbox = tracking_debug.get("person_bbox")
+                def serialize_box(box):
+                    if box is None:
+                        return None
+                    return {
+                        "x_min": round(float(box["x_min"]), 4),
+                        "y_min": round(float(box["y_min"]), 4),
+                        "x_max": round(float(box["x_max"]), 4),
+                        "y_max": round(float(box["y_max"]), 4),
+                    }
+
                 emit_json(
                     "result",
                     text=display_pred,
@@ -851,6 +1370,16 @@ def main():
                     fps=round(fps, 2),
                     ready=bool(ready_to_predict),
                     hands_valid=bool(hands_valid),
+                    valid_hands=valid_hand_count,
+                    roi_mode=tracking_debug.get("roi_mode", ROI_MODE_POSE_LOST),
+                    roi_box=serialize_box(dynamic_roi),
+                    body_roi=serialize_box(body_roi),
+                    person_bbox=serialize_box(person_bbox),
+                    tracking_status=(
+                        "请患者站在识别框内"
+                        if not target_pose_valid
+                        else ("追踪中" if valid_hand_count > 0 else "等待手部")
+                    ),
                     hand_lost_frames=int(hand_lost_frames),
                     sequence_frames=raw_frame_count,
                     window_sec=round(window_duration, 3),
@@ -868,12 +1397,14 @@ def main():
                 last_json_time = now
 
             if args.preview_output and now - last_preview_time >= args.preview_interval:
-                emit_preview(frame, args.preview_width)
+                preview_frame = frame.copy()
+                draw_roi(preview_frame, tracking_debug)
+                emit_preview(preview_frame, args.preview_width)
                 last_preview_time = now
 
             if not args.no_window:
                 draw_start = time.perf_counter()
-                draw_roi(frame)
+                draw_roi(frame, tracking_debug)
 
                 bar_w = min(160, max(110, frame.shape[1] // 4))
                 bar_h = 28

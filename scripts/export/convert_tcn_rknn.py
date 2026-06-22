@@ -1,9 +1,21 @@
 import argparse
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import onnx
 from rknn.api import RKNN
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.common.keypoint_features import (
+    FEATURE_MODE_FULL,
+    FEATURE_MODES,
+    get_feature_dim,
+)
 
 
 INPUT_NAME = "keypoints"
@@ -15,7 +27,8 @@ def parse_args():
     )
     parser.add_argument("--onnx", default="artifacts/models/sign_tcn_best.onnx")
     parser.add_argument("--output", default="artifacts/models/sign_tcn_best.rknn")
-    parser.add_argument("--input-size", type=int, default=258)
+    parser.add_argument("--feature-mode", choices=FEATURE_MODES, default=FEATURE_MODE_FULL)
+    parser.add_argument("--input-size", type=int, default=None)
     parser.add_argument("--target", default="rk3588")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
@@ -53,7 +66,9 @@ def main():
     print(f"Target: {args.target}")
     print(f"Toolkit2: {toolkit_version}")
     print(f"ONNX package: {onnx.__version__}")
-    input_size_list = [[1, 30, args.input_size]]
+    input_size = args.input_size if args.input_size is not None else get_feature_dim(args.feature_mode)
+    input_size_list = [[1, 30, input_size]]
+    print(f"Feature mode: {args.feature_mode}")
     print(f"Input:  {INPUT_NAME} float32 {input_size_list[0]}")
     print("Mode:   non-quantized")
 

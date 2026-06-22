@@ -36,6 +36,11 @@ void CameraView::setFrame(const QImage& image)
     update();
 }
 
+void CameraView::clearFrame()
+{
+    setFrame(QImage());
+}
+
 void CameraView::paint(QPainter* painter)
 {
     QImage frame;

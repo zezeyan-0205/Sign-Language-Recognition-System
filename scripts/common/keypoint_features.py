@@ -7,20 +7,26 @@ HAND_DIM = 21 * 3
 RAW_FEATURE_DIM = POSE_DIM + HAND_DIM * 2
 
 FEATURE_MODE_FULL = "full"
+FEATURE_MODE_FULL_FACE_RELATIVE = "full_face_relative"
 FEATURE_MODE_UPPER_BODY_HANDS_XY = "upper_body_hands_xy"
 FEATURE_MODE_HANDS_XY = "hands_xy"
 FEATURE_MODES = (
     FEATURE_MODE_FULL,
+    FEATURE_MODE_FULL_FACE_RELATIVE,
     FEATURE_MODE_UPPER_BODY_HANDS_XY,
     FEATURE_MODE_HANDS_XY,
 )
 
 UPPER_BODY_POSE_INDICES = (11, 12, 13, 14, 15, 16)
+FACE_REL_HAND_INDICES = (0, 4, 8, 12)
+FACE_REL_DIM = 2 * len(FACE_REL_HAND_INDICES) * 4 * 3
 
 
 def get_feature_dim(feature_mode):
     if feature_mode == FEATURE_MODE_FULL:
         return RAW_FEATURE_DIM
+    if feature_mode == FEATURE_MODE_FULL_FACE_RELATIVE:
+        return RAW_FEATURE_DIM + FACE_REL_DIM
     if feature_mode == FEATURE_MODE_UPPER_BODY_HANDS_XY:
         return len(UPPER_BODY_POSE_INDICES) * 3 + 21 * 2 * 2
     if feature_mode == FEATURE_MODE_HANDS_XY:
@@ -65,6 +71,58 @@ def normalize_keypoints(data):
     return data
 
 
+def valid_xy(point):
+    return not np.allclose(point[:2], 0.0)
+
+
+def average_valid(points):
+    valid = [point[:2] for point in points if valid_xy(point)]
+    if not valid:
+        return None
+    return np.mean(np.stack(valid, axis=0), axis=0)
+
+
+def face_reference_points(pose_frame):
+    nose = pose_frame[0, :2] if valid_xy(pose_frame[0]) else None
+    eye_center = average_valid((pose_frame[2], pose_frame[5]))
+    ear_center = average_valid((pose_frame[7], pose_frame[8]))
+    head_center = average_valid(
+        (pose_frame[0], pose_frame[2], pose_frame[5], pose_frame[7], pose_frame[8])
+    )
+    return (nose, eye_center, ear_center, head_center)
+
+
+def hand_reference_points(hand_frame):
+    if np.allclose(hand_frame, 0.0):
+        return (None, None, None, None)
+    wrist = hand_frame[0, :2] if valid_xy(hand_frame[0]) else None
+    thumb_tip = hand_frame[4, :2] if valid_xy(hand_frame[4]) else None
+    index_tip = hand_frame[8, :2] if valid_xy(hand_frame[8]) else None
+    middle_tip = hand_frame[12, :2] if valid_xy(hand_frame[12]) else None
+    return (wrist, thumb_tip, index_tip, middle_tip)
+
+
+def face_relative_features(pose, left, right):
+    """Append hand-to-face offsets for face-touch signs such as nose/head."""
+    output = np.zeros((pose.shape[0], FACE_REL_DIM), dtype=np.float32)
+    for frame_index in range(pose.shape[0]):
+        face_refs = face_reference_points(pose[frame_index])
+        hand_refs = (
+            *hand_reference_points(left[frame_index]),
+            *hand_reference_points(right[frame_index]),
+        )
+        values = []
+        for hand_point in hand_refs:
+            for face_point in face_refs:
+                if hand_point is None or face_point is None:
+                    values.extend((0.0, 0.0, 0.0))
+                    continue
+                delta = hand_point - face_point
+                values.extend((delta[0], delta[1], np.linalg.norm(delta)))
+        output[frame_index] = np.asarray(values, dtype=np.float32)
+    return output
+
+
 def select_features(normalized_data, feature_mode):
     data = np.asarray(normalized_data, dtype=np.float32)
     if data.ndim != 2 or data.shape[1] != RAW_FEATURE_DIM:
@@ -76,6 +134,13 @@ def select_features(normalized_data, feature_mode):
     pose = data[:, :POSE_DIM].reshape(data.shape[0], 33, 4)
     left = data[:, POSE_DIM:POSE_DIM + HAND_DIM].reshape(data.shape[0], 21, 3)
     right = data[:, POSE_DIM + HAND_DIM:POSE_DIM + HAND_DIM * 2].reshape(data.shape[0], 21, 3)
+
+    if feature_mode == FEATURE_MODE_FULL_FACE_RELATIVE:
+        features = [
+            data,
+            face_relative_features(pose, left, right),
+        ]
+        return np.ascontiguousarray(np.concatenate(features, axis=1).astype(np.float32))
 
     if feature_mode == FEATURE_MODE_UPPER_BODY_HANDS_XY:
         upper_pose_xyv = pose[:, UPPER_BODY_POSE_INDICES, :][:, :, [0, 1, 3]]

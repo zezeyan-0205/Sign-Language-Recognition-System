@@ -5,6 +5,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QVariant>
 #include <QtQml>
 
 int main(int argc, char* argv[])
@@ -23,6 +24,7 @@ int main(int argc, char* argv[])
 
     SignController controller;
     engine.rootContext()->setContextProperty(QStringLiteral("signController"), &controller);
+    engine.setInitialProperties({{QStringLiteral("signController"), QVariant::fromValue(&controller)}});
     engine.load(QUrl(QStringLiteral("qrc:/qml/main.qml")));
     if (engine.rootObjects().isEmpty()) {
         return 1;
@@ -30,6 +32,9 @@ int main(int argc, char* argv[])
 
     if (auto* cameraView = engine.rootObjects().first()->findChild<CameraView*>(QStringLiteral("patientCameraView"))) {
         controller.setCameraView(cameraView);
+    }
+    if (auto* cameraView = engine.rootObjects().first()->findChild<CameraView*>(QStringLiteral("doctorCameraView"))) {
+        controller.setDoctorCameraView(cameraView);
     }
 
     return app.exec();
