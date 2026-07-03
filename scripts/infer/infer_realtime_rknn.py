@@ -38,7 +38,7 @@ WINDOW_SEC = 1.5          # 与采集脚本的 --record_sec 保持一致
 # PREDICT_INTERVAL = 0.10   # 每隔多少秒预测一次，避免每帧都跑模型导致卡顿
 PREDICT_INTERVAL = 0.05
 INPUT_SIZE = 258
-MIN_HAND_ACTIVE_FRAMES = 8
+MIN_HAND_ACTIVE_FRAMES = 12
 HAND_LOST_GRACE_SEC = 0.35
 MODEL_PATH = "artifacts/models/sign_tcn_best.rknn"
 LABEL_MAP_PATH = "label_map.json"
@@ -88,9 +88,9 @@ ROI_MODE_BODY_HAND = "BODY_HAND"
 ROI_MODE_POSE_LOST = "POSE_LOST"
 
 # 预测稳定参数
-CONF_THRESHOLD = 0.60      # 低于这个置信度，显示“识别中...”
-SMOOTH_WINDOW = 6          # 最近8次预测做投票
-MIN_VOTE_COUNT = 3         # 至少4票一致才更新显示
+CONF_THRESHOLD = 0.72      # 低于这个置信度，显示“识别中...”
+SMOOTH_WINDOW = 6          # 最近6次预测做投票
+MIN_VOTE_COUNT = 4         # 至少4票一致才更新显示
 TOKEN_ADD_INTERVAL = 0.8
 DELETE_READD_GRACE = 0.35
 # ================= MediaPipe =================

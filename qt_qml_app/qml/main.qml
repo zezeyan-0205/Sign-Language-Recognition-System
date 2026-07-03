@@ -589,10 +589,19 @@ Window {
         property bool doctorExpanded: true
         property string manualRecord: ""
         property string recordDraft: ""
+        property string recordFilePath: ""
         property string recordStatus: "病历草稿待生成"
         property string lastSavedAt: "尚未保存"
         property string exportedAt: "尚未导出"
+        property bool recordDirty: false
+        property bool suppressRecordDirty: false
         property string doctorToast: ""
+        property string doctorToastMessage: ""
+        property bool doctorToastVisible: false
+        property bool confirmDialogVisible: false
+        property string confirmDialogTitle: ""
+        property string confirmDialogMessage: ""
+        property string confirmDialogAction: ""
         property var complaintList: []
         property string lastWrittenComplaint: ""
         property string patientName: ""
@@ -609,6 +618,7 @@ Window {
         property int currentPageIndex: 0
         property int archiveSelectedIndex: 0
         property string archiveSearchText: ""
+        property var savedArchiveRecords: []
         property string placeholderPageTitle: "业务页面"
         property string placeholderPageHint: "该功能页已接入导航，后续可继续扩展真实业务内容。"
         property var navItems: [
@@ -620,18 +630,37 @@ Window {
 
         Component.onCompleted: {
             patientWindow.placeWindowOnScreen(doctorWindow, "HDMI", 0, true)
+            refreshArchiveRecords()
         }
 
         onDoctorToastChanged: {
-            if (doctorToast.length > 0)
+            if (doctorToast.length > 0) {
+                doctorToastMessage = doctorToast
+                doctorToastVisible = true
                 doctorToastTimer.restart()
+            }
         }
 
         Timer {
             id: doctorToastTimer
-            interval: 2200
+            interval: 1000
             repeat: false
-            onTriggered: doctorWindow.doctorToast = ""
+            onTriggered: {
+                doctorWindow.doctorToastVisible = false
+                doctorToastClearTimer.restart()
+            }
+        }
+
+        Timer {
+            id: doctorToastClearTimer
+            interval: 240
+            repeat: false
+            onTriggered: {
+                if (!doctorWindow.doctorToastVisible) {
+                    doctorWindow.doctorToast = ""
+                    doctorWindow.doctorToastMessage = ""
+                }
+            }
         }
 
         Connections {
@@ -944,6 +973,14 @@ Window {
                                         font.bold: true
                                         elide: Text.ElideRight
                                     }
+
+                                    Text {
+                                        width: parent.width
+                                        text: doctorWindow.currentEditingLabel()
+                                        color: doctorWindow.recordDirty ? "#b36b23" : "#667085"
+                                        font.pixelSize: 16
+                                        elide: Text.ElideRight
+                                    }
                                 }
                             }
 
@@ -1028,7 +1065,7 @@ Window {
 		                                    label: "新建病历"
 		                                    fontSize: 18
 		                                    activeColor: "#6d7d8a"
-		                                    onClicked: doctorWindow.newRecord()
+		                                    onClicked: doctorWindow.requestNewRecord()
 		                                }
 
 	                                Rectangle {
@@ -1050,7 +1087,7 @@ Window {
 
                                     TapHandler {
                                         id: clearArea
-                                        onTapped: doctorWindow.clearAllContent()
+                                        onTapped: doctorWindow.requestClearAllContent()
                                     }
 
                                     HoverHandler {
@@ -1110,6 +1147,10 @@ Window {
 	                                                verticalAlignment: TextInput.AlignVCenter
 	                                                clip: true
 	                                                onTextChanged: doctorWindow.doctorReplyDraft = text
+	                                                onAccepted: {
+	                                                    if (doctorWindow.doctorReplyDraft.trim().length > 0)
+	                                                        doctorWindow.sendDoctorReply()
+	                                                }
 	                                            }
 
 	                                            Text {
@@ -1202,7 +1243,7 @@ Window {
 			                                Item {
 			                                    width: 96
 			                                    height: parent.height
-			                                    TextInput { anchors.fill: parent; text: doctorWindow.patientName; color: "#1e2f3d"; font.pixelSize: 16; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: doctorWindow.patientName = text }
+			                                    TextInput { anchors.fill: parent; text: doctorWindow.patientName; color: "#1e2f3d"; font.pixelSize: 16; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: { doctorWindow.patientName = text; if (activeFocus) doctorWindow.markRecordDirty() } }
 			                                    Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: "#000000" }
 			                                }
 
@@ -1210,7 +1251,7 @@ Window {
 			                                Item {
 			                                    width: 58
 			                                    height: parent.height
-			                                    TextInput { anchors.fill: parent; text: doctorWindow.patientGender; color: "#1e2f3d"; font.pixelSize: 16; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: doctorWindow.patientGender = text }
+			                                    TextInput { anchors.fill: parent; text: doctorWindow.patientGender; color: "#1e2f3d"; font.pixelSize: 16; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: { doctorWindow.patientGender = text; if (activeFocus) doctorWindow.markRecordDirty() } }
 			                                    Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: "#000000" }
 			                                }
 
@@ -1218,7 +1259,7 @@ Window {
 			                                Item {
 			                                    width: 58
 			                                    height: parent.height
-			                                    TextInput { anchors.fill: parent; text: doctorWindow.patientAge; color: "#1e2f3d"; font.pixelSize: 16; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: doctorWindow.patientAge = text }
+			                                    TextInput { anchors.fill: parent; text: doctorWindow.patientAge; color: "#1e2f3d"; font.pixelSize: 16; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: { doctorWindow.patientAge = text; if (activeFocus) doctorWindow.markRecordDirty() } }
 			                                    Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: "#000000" }
 			                                }
 
@@ -1226,7 +1267,7 @@ Window {
 			                                Item {
 			                                    width: 112
 			                                    height: parent.height
-			                                    TextInput { anchors.fill: parent; text: doctorWindow.recordNo; color: "#1e2f3d"; font.pixelSize: 16; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: doctorWindow.recordNo = text }
+			                                    TextInput { anchors.fill: parent; text: doctorWindow.recordNo; color: "#1e2f3d"; font.pixelSize: 16; horizontalAlignment: TextInput.AlignHCenter; verticalAlignment: TextInput.AlignVCenter; selectByMouse: true; onTextChanged: { doctorWindow.recordNo = text; if (activeFocus) doctorWindow.markRecordDirty() } }
 			                                    Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: "#000000" }
 			                                }
 		                            }
@@ -1300,18 +1341,21 @@ Window {
 			                                    text: doctorWindow.currentHistory
 			                                    color: "#1e2f3d"
 			                                    font.pixelSize: 15
+			                                    horizontalAlignment: TextEdit.AlignLeft
 			                                    wrapMode: TextEdit.Wrap
 			                                    selectByMouse: true
 			                                    clip: true
-			                                    onTextChanged: doctorWindow.currentHistory = text
+			                                    onTextChanged: { doctorWindow.currentHistory = text; if (activeFocus) doctorWindow.markRecordDirty() }
 			                                }
 
 			                                Text {
 			                                    anchors.left: parent.left
+			                                    anchors.right: parent.right
 			                                    anchors.top: parent.top
 			                                    text: "待医生补充"
 			                                    color: "#9aaaba"
 			                                    font.pixelSize: 16
+			                                    horizontalAlignment: Text.AlignLeft
 			                                    visible: currentHistoryEdit.text.length === 0
 			                                }
 			                            }
@@ -1338,18 +1382,21 @@ Window {
 		                                    text: doctorWindow.doctorNote
 		                                    color: "#1e2f3d"
 		                                    font.pixelSize: 15
+		                                    horizontalAlignment: TextEdit.AlignLeft
 		                                    wrapMode: TextEdit.Wrap
 		                                    selectByMouse: true
 		                                    clip: true
-		                                    onTextChanged: doctorWindow.doctorNote = text
+		                                    onTextChanged: { doctorWindow.doctorNote = text; if (activeFocus) doctorWindow.markRecordDirty() }
 		                                }
 
 		                                Text {
 		                                    anchors.left: parent.left
+		                                    anchors.right: parent.right
 		                                    anchors.top: parent.top
 		                                    text: "待医生补充"
 		                                    color: "#9aaaba"
 		                                    font.pixelSize: 16
+		                                    horizontalAlignment: Text.AlignLeft
 		                                    visible: doctorNoteEdit.text.length === 0
 		                                }
 		                            }
@@ -1376,18 +1423,21 @@ Window {
 			                                    text: doctorWindow.treatmentPlan
 			                                    color: "#1e2f3d"
 			                                    font.pixelSize: 15
+			                                    horizontalAlignment: TextEdit.AlignLeft
 			                                    wrapMode: TextEdit.Wrap
 			                                    selectByMouse: true
 			                                    clip: true
-			                                    onTextChanged: doctorWindow.treatmentPlan = text
+			                                    onTextChanged: { doctorWindow.treatmentPlan = text; if (activeFocus) doctorWindow.markRecordDirty() }
 			                                }
 
 			                                Text {
 			                                    anchors.left: parent.left
+			                                    anchors.right: parent.right
 			                                    anchors.top: parent.top
 			                                    text: "待医生补充"
 			                                    color: "#9aaaba"
 			                                    font.pixelSize: 16
+			                                    horizontalAlignment: Text.AlignLeft
 			                                    visible: treatmentPlanEdit.text.length === 0
 			                                }
 			                            }
@@ -1415,9 +1465,10 @@ Window {
 		                                        text: doctorWindow.doctorSignature
 		                                        color: "#1e2f3d"
 		                                        font.pixelSize: 16
+		                                        horizontalAlignment: TextInput.AlignHCenter
 		                                        verticalAlignment: TextInput.AlignVCenter
 		                                        selectByMouse: true
-		                                        onTextChanged: doctorWindow.doctorSignature = text
+		                                        onTextChanged: { doctorWindow.doctorSignature = text; if (activeFocus) doctorWindow.markRecordDirty() }
 		                                    }
 		                                    Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: "#000000" }
 			                                }
@@ -1528,7 +1579,7 @@ Window {
                                         label: "新建病历"
                                         fontSize: 16
                                         activeColor: theme.blueDeep
-                                        onClicked: doctorWindow.newRecord()
+                                        onClicked: doctorWindow.requestNewRecord()
                                     }
                                 }
 
@@ -1655,7 +1706,7 @@ Window {
                     spacing: 14
 
                     MedicalCard {
-                        width: parent.width
+                        width: parent.width - 190
                         height: 82
                         cardColor: theme.bgElevated
                         gradientTop: theme.bgElevatedTop
@@ -1670,7 +1721,7 @@ Window {
                                 spacing: 18
 
                                 Column {
-                                    width: parent.width - 440
+                                    width: parent.width - 288
                                     height: parent.height
                                     spacing: 4
 
@@ -1725,16 +1776,6 @@ Window {
                                     }
                                 }
 
-                                MedicalButton {
-                                    width: 134
-                                    height: 48
-                                    label: "新建病历"
-                                    fontSize: 16
-                                    activeColor: theme.blueDeep
-                                    primaryAction: true
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    onClicked: doctorWindow.newRecord()
-                                }
                             }
                         ]
                     }
@@ -1969,7 +2010,16 @@ Window {
                                     spacing: 11
 
                                     Text { width: parent.width; text: "门诊手语沟通病历"; color: "#17324d"; font.pixelSize: 27; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                                    Text { width: parent.width; text: "姓名：______    性别：______    年龄：______"; color: "#34495e"; font.pixelSize: 16 }
+                                    Text {
+                                        width: parent.width
+                                        text: "姓名：" + doctorWindow.archiveField("name", "______") +
+                                              "    性别：" + doctorWindow.archiveField("gender", "______") +
+                                              "    年龄：" + doctorWindow.archiveField("age", "______") +
+                                              "    病历号：" + doctorWindow.archiveField("record_no", "______")
+                                        color: "#34495e"
+                                        font.pixelSize: 16
+                                        elide: Text.ElideRight
+                                    }
                                     Text { width: parent.width; text: "科室：门诊      日期：" + doctorWindow.archiveSelectedDate(); color: "#34495e"; font.pixelSize: 16 }
                                     Rectangle { width: parent.width; height: 1; color: "#d9e1ea" }
                                     Text { width: parent.width; text: "患者主诉："; color: "#17324d"; font.pixelSize: 18; font.bold: true }
@@ -1988,14 +2038,46 @@ Window {
 
                                     Rectangle { width: parent.width; height: 1; color: "#d9e1ea" }
                                     Text { width: parent.width; text: "现病史："; color: "#17324d"; font.pixelSize: 18; font.bold: true }
-                                    Text { width: parent.width; text: "待医生补充"; color: "#a8b4bf"; font.pixelSize: 16 }
-                                    Rectangle { width: parent.width; height: 1; color: "#e1e8ef" }
+                                    Text {
+                                        width: parent.width
+                                        height: 50
+                                        text: doctorWindow.archiveField("current_history", "待医生补充")
+                                        color: doctorWindow.archiveField("current_history", "").length > 0 ? "#20303f" : "#a8b4bf"
+                                        font.pixelSize: 16
+                                        wrapMode: Text.WordWrap
+                                        clip: true
+                                    }
                                     Rectangle { width: parent.width; height: 1; color: "#e1e8ef" }
                                     Rectangle { width: parent.width; height: 1; color: "#e1e8ef" }
                                     Text { width: parent.width; text: "医生备注："; color: "#17324d"; font.pixelSize: 18; font.bold: true }
-                                    Text { width: parent.width; text: "待医生补充"; color: "#a8b4bf"; font.pixelSize: 16 }
+                                    Text {
+                                        width: parent.width
+                                        height: 50
+                                        text: doctorWindow.archiveField("doctor_note", "待医生补充")
+                                        color: doctorWindow.archiveField("doctor_note", "").length > 0 ? "#20303f" : "#a8b4bf"
+                                        font.pixelSize: 16
+                                        wrapMode: Text.WordWrap
+                                        clip: true
+                                    }
                                     Rectangle { width: parent.width; height: 1; color: "#e1e8ef" }
                                     Rectangle { width: parent.width; height: 1; color: "#e1e8ef" }
+                                    Text { width: parent.width; text: "处理意见："; color: "#17324d"; font.pixelSize: 18; font.bold: true }
+                                    Text {
+                                        width: parent.width
+                                        height: 50
+                                        text: doctorWindow.archiveField("treatment_plan", "待医生补充")
+                                        color: doctorWindow.archiveField("treatment_plan", "").length > 0 ? "#20303f" : "#a8b4bf"
+                                        font.pixelSize: 16
+                                        wrapMode: Text.WordWrap
+                                        clip: true
+                                    }
+                                    Rectangle { width: parent.width; height: 1; color: "#e1e8ef" }
+                                    Text {
+                                        width: parent.width
+                                        text: "医生签名：" + doctorWindow.archiveField("doctor_signature", "______")
+                                        color: "#34495e"
+                                        font.pixelSize: 16
+                                    }
                                 }
                             }
 
@@ -2007,10 +2089,10 @@ Window {
                                 height: 54
                                 spacing: 10
 
-                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "继续编辑"; fontSize: 16; activeColor: theme.secondaryButton; onClicked: doctorWindow.selectDoctorPage(0) }
-                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "保存病历"; fontSize: 16; activeColor: theme.blueDeep; primaryAction: true; onClicked: doctorWindow.saveRecord() }
-                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "导出病历"; fontSize: 16; activeColor: theme.secondaryButton; onClicked: doctorWindow.exportRecord() }
-                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "删除记录"; fontSize: 16; activeColor: "#a87878"; onClicked: doctorWindow.deleteArchiveRecord() }
+                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "继续编辑"; fontSize: 16; activeColor: theme.secondaryButton; onClicked: doctorWindow.loadArchiveRecordForEditing() }
+                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "保存病历"; fontSize: 16; activeColor: theme.blueDeep; primaryAction: true; onClicked: doctorWindow.saveArchiveSelection() }
+                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "导出病历"; fontSize: 16; activeColor: theme.secondaryButton; onClicked: doctorWindow.exportArchiveSelection() }
+                                MedicalButton { width: (parent.width - parent.spacing * 3) / 4; height: parent.height; label: "删除记录"; fontSize: 16; activeColor: "#a87878"; onClicked: doctorWindow.requestDeleteArchiveRecord() }
                             }
                         }
                     }
@@ -2387,34 +2469,104 @@ Window {
         }
 
         Rectangle {
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            anchors.rightMargin: 32
-            anchors.bottomMargin: 32
-            width: Math.min(parent.width - doctorWindow.navWidth - 64, 420)
-            height: 58
+            anchors.centerIn: parent
+            width: Math.min(parent.width - doctorWindow.navWidth - 96, 520)
+            height: 70
             radius: 12
             color: "#dd17324d"
             border.width: 1
             border.color: "#8fc7e0"
-            visible: doctorWindow.doctorToast.length > 0
-            opacity: visible ? 1.0 : 0.0
+            visible: doctorWindow.doctorToastMessage.length > 0
+            opacity: doctorWindow.doctorToastVisible ? 1.0 : 0.0
+            scale: doctorWindow.doctorToastVisible ? 1.0 : 0.97
             z: 130
 
             Behavior on opacity {
-                NumberAnimation { duration: 160 }
+                NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+            }
+
+            Behavior on scale {
+                NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
             }
 
             Text {
                 anchors.fill: parent
                 anchors.leftMargin: 18
                 anchors.rightMargin: 18
-                text: doctorWindow.doctorToast
+                text: doctorWindow.doctorToastMessage
                 color: "white"
                 font.pixelSize: 18
                 font.bold: true
+                horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
                 elide: Text.ElideRight
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            visible: doctorWindow.confirmDialogVisible
+            color: "#66000000"
+            z: 125
+
+            Rectangle {
+                width: 460
+                height: 230
+                anchors.centerIn: parent
+                radius: 14
+                color: "#ffffff"
+                border.width: 1
+                border.color: "#cfdbe5"
+
+                Column {
+                    anchors.fill: parent
+                    anchors.margins: 26
+                    spacing: 18
+
+                    Text {
+                        width: parent.width
+                        text: doctorWindow.confirmDialogTitle
+                        color: "#17324d"
+                        font.pixelSize: 24
+                        font.bold: true
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+
+                    Text {
+                        width: parent.width
+                        height: 70
+                        text: doctorWindow.confirmDialogMessage
+                        color: "#4b5b68"
+                        font.pixelSize: 17
+                        wrapMode: Text.WordWrap
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    Row {
+                        width: parent.width
+                        height: 48
+                        spacing: 14
+
+                        MedicalButton {
+                            width: (parent.width - parent.spacing) / 2
+                            height: parent.height
+                            label: "取消"
+                            fontSize: 18
+                            activeColor: theme.secondaryButton
+                            onClicked: doctorWindow.cancelConfirm()
+                        }
+
+                        MedicalButton {
+                            width: (parent.width - parent.spacing) / 2
+                            height: parent.height
+                            label: "确认"
+                            fontSize: 18
+                            activeColor: "#a87878"
+                            onClicked: doctorWindow.acceptConfirm()
+                        }
+                    }
+                }
             }
         }
 
@@ -2547,7 +2699,7 @@ Window {
 
         function handlePlaceholderAction(action) {
             if (action === "new_record") {
-                newRecord()
+                requestNewRecord()
             } else if (action === "save_record") {
                 saveRecord()
             } else if (action === "export_record") {
@@ -2624,8 +2776,22 @@ Window {
         function homeStatusLine() {
             var state = !signController.running ? "待启动" : (hasChiefComplaint() ? "已生成主诉" : "识别中")
             var device = signController.statusText === "错误" ? "设备异常" : "设备正常"
-            var record = lastSavedAt === "尚未保存" ? "病历待保存" : "已保存"
+            var record = recordDirty ? "病历待保存" : (exportedAt !== "尚未导出" ? "已导出" : (lastSavedAt === "尚未保存" ? "病历待保存" : "已保存"))
             return "● " + state + "｜" + device + "｜" + record
+        }
+
+        function currentEditingLabel() {
+            var title = patientName.length > 0 ? patientName : (recordNo.length > 0 ? "病历号 " + recordNo : "未命名病历")
+            var state = recordDirty ? "未保存修改" : (exportedAt !== "尚未导出" ? "已导出" : (lastSavedAt === "尚未保存" ? "待保存" : "已保存"))
+            return "当前编辑：" + title + " / " + state
+        }
+
+        function markRecordDirty() {
+            if (suppressRecordDirty)
+                return
+            recordDirty = true
+            exportedAt = "尚未导出"
+            recordStatus = "病历待保存"
         }
 
         function composerCleanText() {
@@ -2651,6 +2817,63 @@ Window {
             return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate())
         }
 
+        function refreshArchiveRecords() {
+            savedArchiveRecords = signController.loadMedicalRecords()
+        }
+
+        function recordJsonText(status) {
+            var complaint = hasRecordComplaint() ? recordComplaintText() : patientWindow.cleanSentence()
+            var data = {
+                "created_at": currentDateText() + " " + timeText().substring(0, 5),
+                "status": status,
+                "name": patientName,
+                "gender": patientGender,
+                "age": patientAge,
+                "record_no": recordNo,
+                "complaint": complaint,
+                "current_history": currentHistory,
+                "doctor_note": doctorNote,
+                "treatment_plan": treatmentPlan,
+                "doctor_signature": doctorSignature,
+                "tokens": patientWindow.cleanTokens(),
+                "symptom": symptomText(),
+                "onset": onsetText(),
+                "composer": composerCleanText()
+            }
+            return JSON.stringify(data)
+        }
+
+        function archiveRecordJsonText(record, status) {
+            var data = {
+                "created_at": record.created_at && record.created_at.length > 0 ? record.created_at : record.time,
+                "status": status,
+                "name": record.name ? record.name : "",
+                "gender": record.gender ? record.gender : "",
+                "age": record.age ? record.age : "",
+                "record_no": record.record_no ? record.record_no : "",
+                "complaint": record.complaint ? record.complaint : "",
+                "current_history": record.current_history ? record.current_history : "",
+                "doctor_note": record.doctor_note ? record.doctor_note : "",
+                "treatment_plan": record.treatment_plan ? record.treatment_plan : "",
+                "doctor_signature": record.doctor_signature ? record.doctor_signature : ""
+            }
+            return JSON.stringify(data)
+        }
+
+        function archiveRecordPlainText(record) {
+            var lines = []
+            lines.push("姓名：" + (record.name ? record.name : ""))
+            lines.push("性别：" + (record.gender ? record.gender : ""))
+            lines.push("年龄：" + (record.age ? record.age : ""))
+            lines.push("病历号：" + (record.record_no ? record.record_no : ""))
+            lines.push("主诉：" + (record.complaint ? record.complaint : ""))
+            lines.push("现病史：" + (record.current_history ? record.current_history : "待医生补充"))
+            lines.push("医生备注：" + (record.doctor_note ? record.doctor_note : "待医生补充"))
+            lines.push("处理意见：" + (record.treatment_plan ? record.treatment_plan : "待医生补充"))
+            lines.push("医生签名：" + (record.doctor_signature ? record.doctor_signature : ""))
+            return lines.join("；")
+        }
+
 		        function buildRecordText() {
 		            var sentence = hasRecordComplaint() ? recordComplaintText() : patientWindow.cleanSentence()
 		            var tokens = patientWindow.cleanTokens()
@@ -2674,12 +2897,24 @@ Window {
         }
 
         function archiveHistoryRecords() {
-            return [
-                { "time": "2026-06-20 09:12", "status": "已导出", "complaint": "我头疼。" },
-                { "time": "2026-06-19 15:40", "status": "已保存", "complaint": "昨天我咳嗽到今天。" },
-                { "time": "2026-06-18 10:25", "status": "已保存", "complaint": "今天我鼻子流血。" },
-                { "time": "2026-06-17 14:08", "status": "已导出", "complaint": "我拉肚子三小时。" }
-            ]
+            var query = archiveSearchText.trim()
+            if (query.length === 0)
+                return savedArchiveRecords
+
+            var filtered = []
+            for (var i = 0; i < savedArchiveRecords.length; ++i) {
+                var record = savedArchiveRecords[i]
+                var haystack = record.time + " " +
+                               record.status + " " +
+                               record.complaint + " " +
+                               record.name + " " +
+                               record.record_no + " " +
+                               record.gender + " " +
+                               record.age
+                if (haystack.indexOf(query) >= 0)
+                    filtered.push(record)
+            }
+            return filtered
         }
 
 	        function hasArchiveDraft() {
@@ -2701,7 +2936,22 @@ Window {
             archiveSelectedIndex = index
         }
 
+        function selectArchivePath(path) {
+            var records = archiveHistoryRecords()
+            for (var i = 0; i < records.length; ++i) {
+                if (records[i].path === path) {
+                    archiveSelectedIndex = i + 1
+                    return
+                }
+            }
+            archiveSelectedIndex = hasArchiveDraft() ? 0 : (records.length > 0 ? 1 : -1)
+        }
+
         function archiveDraftStatus() {
+            if (recordDirty)
+                return "待保存"
+            if (exportedAt !== "尚未导出")
+                return "已导出"
             return lastSavedAt === "尚未保存" ? "待保存" : "已保存"
         }
 
@@ -2723,19 +2973,94 @@ Window {
                 return {
                     "time": archiveDraftTime(),
                     "status": archiveDraftStatus(),
-                    "complaint": archiveDraftSummary()
+                    "complaint": archiveDraftSummary(),
+                    "saved_at": lastSavedAt === "尚未保存" ? "" : lastSavedAt,
+                    "exported_at": exportedAt === "尚未导出" ? "" : exportedAt,
+                    "updated_at": archiveDraftTime(),
+                    "plain_text": recordDraft,
+                    "path": recordFilePath,
+                    "name": patientName,
+                    "gender": patientGender,
+                    "age": patientAge,
+                    "record_no": recordNo,
+                    "current_history": currentHistory,
+                    "doctor_note": doctorNote,
+                    "treatment_plan": treatmentPlan,
+                    "doctor_signature": doctorSignature
                 }
             }
             var records = archiveHistoryRecords()
             if (index > 0 && index - 1 < records.length)
                 return records[index - 1]
-            return { "time": "", "status": "", "complaint": "请选择左侧病历记录。" }
+            return {
+                "time": "",
+                "status": "",
+                "complaint": "请选择左侧病历记录。",
+                "saved_at": "",
+                "exported_at": "",
+                "updated_at": "",
+                "plain_text": "",
+                "path": "",
+                "name": "",
+                "gender": "",
+                "age": "",
+                "record_no": "",
+                "current_history": "",
+                "doctor_note": "",
+                "treatment_plan": "",
+                "doctor_signature": ""
+            }
+        }
+
+        function loadArchiveRecordForEditing() {
+            if (!archiveHasSelection()) {
+                doctorToast = "请先选择病历记录"
+                return
+            }
+
+            var record = archiveSelectedRecord()
+            suppressRecordDirty = true
+            patientName = doctorWindow.archiveField("name", "")
+            patientGender = doctorWindow.archiveField("gender", "")
+            patientAge = doctorWindow.archiveField("age", "")
+            recordNo = doctorWindow.archiveField("record_no", "")
+            currentHistory = doctorWindow.archiveField("current_history", "")
+            doctorNote = doctorWindow.archiveField("doctor_note", "")
+            treatmentPlan = doctorWindow.archiveField("treatment_plan", "")
+            doctorSignature = doctorWindow.archiveField("doctor_signature", "")
+
+            var complaint = doctorWindow.archiveSelectedComplaint()
+            if (complaint === "请选择左侧病历记录。" || complaint === "待患者表达后自动生成。") {
+                complaintList = []
+                lastWrittenComplaint = ""
+            } else {
+                complaintList = complaint.split("\n")
+                lastWrittenComplaint = complaintList.length > 0 ? complaintList[complaintList.length - 1] : ""
+            }
+
+            recordFilePath = record.path ? record.path : ""
+            recordDraft = record.plain_text && record.plain_text.length > 0 ? record.plain_text : buildRecordText()
+            lastSavedAt = record.saved_at && record.saved_at.length > 0 ? record.saved_at : record.time
+            exportedAt = record.exported_at && record.exported_at.length > 0 ? record.exported_at : "尚未导出"
+            recordDirty = false
+            suppressRecordDirty = false
+            recordStatus = record.status && record.status.length > 0 ? "已加载历史病历：" + record.status : "已加载历史病历"
+            doctorToast = "已加载病历，可继续编辑"
+            selectDoctorPage(0)
         }
 
         function archiveSelectedComplaint() {
             if (!archiveHasSelection())
                 return "请选择左侧病历记录。"
             return archiveSelectedRecord().complaint
+        }
+
+        function archiveField(name, fallback) {
+            var record = archiveSelectedRecord()
+            var value = record[name]
+            if (value === undefined || value === null || String(value).length === 0)
+                return fallback
+            return value
         }
 
         function archiveSelectedDate() {
@@ -2749,12 +3074,127 @@ Window {
                 archiveSelectedIndex = archiveHistoryRecords().length > 0 ? 1 : -1
                 return
             }
-            doctorToast = "历史记录删除入口已就绪"
+            var record = archiveSelectedRecord()
+            if (record.path && signController.deleteMedicalRecord(record.path)) {
+                refreshArchiveRecords()
+                archiveSelectedIndex = archiveHistoryRecords().length > 0 ? 1 : -1
+                doctorToast = "历史病历已删除"
+            } else {
+                doctorToast = "删除失败，请检查文件权限"
+            }
+        }
+
+        function requestConfirm(action, title, message) {
+            confirmDialogAction = action
+            confirmDialogTitle = title
+            confirmDialogMessage = message
+            confirmDialogVisible = true
+        }
+
+        function cancelConfirm() {
+            confirmDialogVisible = false
+            confirmDialogAction = ""
+        }
+
+        function acceptConfirm() {
+            var action = confirmDialogAction
+            confirmDialogVisible = false
+            confirmDialogAction = ""
+            if (action === "new_record") {
+                newRecord()
+            } else if (action === "clear_all") {
+                clearAllContent()
+            } else if (action === "delete_archive") {
+                deleteArchiveRecord()
+            }
+        }
+
+        function requestNewRecord() {
+            if (recordDirty || hasRecordComplaint() || patientName.length > 0 || recordFilePath.length > 0) {
+                requestConfirm("new_record", "确认新建病历？", "当前病历内容将从首页清空。未保存的修改不会保留。")
+                return
+            }
+            newRecord()
+        }
+
+        function requestClearAllContent() {
+            requestConfirm("clear_all", "确认清空内容？", "当前识别内容和病历草稿都会被清空。")
+        }
+
+        function requestDeleteArchiveRecord() {
+            if (!archiveHasSelection()) {
+                doctorToast = "请先选择病历记录"
+                return
+            }
+            requestConfirm("delete_archive", "确认删除病历？", "删除后会移除该病历记录及对应导出文件。")
+        }
+
+        function saveArchiveSelection() {
+            if (archiveEffectiveIndex() === 0) {
+                saveRecord()
+                return
+            }
+
+            if (!archiveHasSelection()) {
+                doctorToast = "请先选择病历记录"
+                return
+            }
+
+            var record = archiveSelectedRecord()
+            if (!record.path || record.path.length === 0) {
+                doctorToast = "当前记录无法保存"
+                return
+            }
+
+            var path = signController.saveMedicalRecord(
+                archiveRecordJsonText(record, "已保存"),
+                archiveRecordPlainText(record),
+                record.path)
+            if (path.length === 0) {
+                doctorToast = "保存失败，请检查目录权限"
+                return
+            }
+            refreshArchiveRecords()
+            selectArchivePath(path)
+            doctorToast = "病历已保存"
+        }
+
+        function exportArchiveSelection() {
+            if (archiveEffectiveIndex() === 0) {
+                exportRecord()
+                return
+            }
+
+            if (!archiveHasSelection()) {
+                doctorToast = "请先选择病历记录"
+                return
+            }
+
+            var record = archiveSelectedRecord()
+            if (!record.path || record.path.length === 0) {
+                doctorToast = "请先保存病历再导出"
+                return
+            }
+
+            var path = signController.exportMedicalRecord(
+                archiveRecordJsonText(record, "已导出"),
+                archiveRecordPlainText(record),
+                record.path)
+            if (path.length === 0) {
+                doctorToast = "导出失败，请检查目录权限"
+                return
+            }
+            refreshArchiveRecords()
+            selectArchivePath(record.path)
+            doctorToast = "病历已导出"
         }
 
 	        function newRecord() {
+	            suppressRecordDirty = true
+	            signController.clearExpression()
 	            manualRecord = ""
 	            recordDraft = ""
+	            recordFilePath = ""
 	            complaintList = []
 	            lastWrittenComplaint = ""
 	            patientName = ""
@@ -2768,29 +3208,51 @@ Window {
 	            recordStatus = "已新建空白病历，可继续采集手语主诉"
             lastSavedAt = "尚未保存"
             exportedAt = "尚未导出"
+            recordDirty = false
+            suppressRecordDirty = false
             archiveSelectedIndex = 0
             doctorToast = "已新建病历"
         }
 
         function saveRecord() {
-            if (recordDraft.length === 0)
-                recordDraft = buildRecordText()
+            recordDraft = buildRecordText()
+            var path = signController.saveMedicalRecord(recordJsonText("已保存"), recordDraft, recordFilePath)
+            if (path.length === 0) {
+                doctorToast = "保存失败，请检查目录权限"
+                return
+            }
+            recordFilePath = path
             lastSavedAt = timeText()
-            recordStatus = "病历已保存到当前会话"
+            recordStatus = "病历已保存"
+            recordDirty = false
+            refreshArchiveRecords()
             doctorToast = "病历已保存"
         }
 
         function exportRecord() {
-            if (recordDraft.length === 0)
-                recordDraft = buildRecordText()
+            if (recordFilePath.length === 0) {
+                doctorToast = "请先保存病历再导出"
+                recordStatus = "病历尚未保存，无法导出"
+                return
+            }
+            recordDraft = buildRecordText()
+            var path = signController.exportMedicalRecord(recordJsonText("已导出"), recordDraft, recordFilePath)
+            if (path.length === 0) {
+                doctorToast = "导出失败，请检查目录权限"
+                return
+            }
             exportedAt = timeText()
-            recordStatus = "已生成导出内容，后续可接入 TXT / JSON / HIS"
-            doctorToast = "病历已准备导出"
+            recordStatus = "病历已导出"
+            recordDirty = false
+            refreshArchiveRecords()
+            doctorToast = "病历已导出"
         }
 
 	        function clearRecord() {
+	            suppressRecordDirty = true
 	            manualRecord = ""
 	            recordDraft = ""
+	            recordFilePath = ""
 	            complaintList = []
 	            lastWrittenComplaint = ""
 	            patientName = ""
@@ -2803,6 +3265,8 @@ Window {
 	            doctorSignature = ""
 	            recordStatus = "病历草稿已清空"
             exportedAt = "尚未导出"
+            recordDirty = false
+            suppressRecordDirty = false
             doctorToast = "已清空病历草稿"
         }
 
@@ -2821,6 +3285,7 @@ Window {
 	            lastWrittenComplaint = currentComplaint
 	            recordDraft = buildRecordText()
 	            lastSavedAt = "尚未保存"
+	            recordDirty = true
 	            recordStatus = "主诉已追加写入病历，病历待保存"
 	            doctorToast = "已追加写入病历"
 	        }

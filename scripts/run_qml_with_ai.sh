@@ -13,6 +13,9 @@ RKLLM_PORT="${RKLLM_PORT:-8080}"
 DISPLAY="${DISPLAY:-:0.0}"
 QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
 QSG_RENDER_LOOP="${QSG_RENDER_LOOP:-basic}"
+GTK_IM_MODULE="${GTK_IM_MODULE:-fcitx}"
+QT_IM_MODULE="${QT_IM_MODULE:-fcitx}"
+XMODIFIERS="${XMODIFIERS:-@im=fcitx}"
 DSI_BACKLIGHT_PATH="${DSI_BACKLIGHT_PATH:-/sys/class/backlight/backlight-dsi0/brightness}"
 DSI_BRIGHTNESS="${DSI_BRIGHTNESS:-250}"
 
@@ -81,6 +84,23 @@ set_dsi_brightness() {
     fi
 }
 
+start_input_method() {
+    export GTK_IM_MODULE QT_IM_MODULE XMODIFIERS
+
+    if ! command -v fcitx5 >/dev/null 2>&1; then
+        echo "[run] fcitx5 not found, Chinese input method will be skipped"
+        return 0
+    fi
+
+    if pgrep -x fcitx5 >/dev/null 2>&1; then
+        echo "[run] fcitx5 input method already running"
+        return 0
+    fi
+
+    echo "[run] starting fcitx5 input method"
+    fcitx5 -d >/dev/null 2>&1 || echo "[run] failed to start fcitx5"
+}
+
 if [[ ! -x "$QML_APP" ]]; then
     echo "[run] QML app not found, building SignLanguageQml ..."
     cmake -S "$ROOT_DIR" -B "$BUILD_DIR"
@@ -98,6 +118,7 @@ if [[ ! -f "$RKLLM_SERVER_DIR/flask_server.py" ]]; then
 fi
 
 set_dsi_brightness
+start_input_method
 
 if port_open; then
     echo "[run] rkllm server already running at http://$RKLLM_HOST:$RKLLM_PORT"
@@ -123,6 +144,7 @@ echo "[run] starting QML UI"
 echo "[run] DISPLAY=$DISPLAY"
 echo "[run] QT_QUICK_BACKEND=$QT_QUICK_BACKEND"
 echo "[run] QSG_RENDER_LOOP=$QSG_RENDER_LOOP"
-export DISPLAY QT_QUICK_BACKEND QSG_RENDER_LOOP
+echo "[run] QT_IM_MODULE=$QT_IM_MODULE"
+export DISPLAY QT_QUICK_BACKEND QSG_RENDER_LOOP GTK_IM_MODULE QT_IM_MODULE XMODIFIERS
 cd "$ROOT_DIR"
 "$QML_APP"

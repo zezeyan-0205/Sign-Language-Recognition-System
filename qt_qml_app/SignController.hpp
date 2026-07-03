@@ -9,6 +9,7 @@
 #include <QProcess>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantList>
 
 #include <atomic>
 #include <mutex>
@@ -53,6 +54,14 @@ public:
     Q_INVOKABLE void deleteLastToken();
     Q_INVOKABLE void clearExpression();
     Q_INVOKABLE void bindDoctorCameraView(QObject* cameraView);
+    Q_INVOKABLE QString saveMedicalRecord(const QString& jsonText,
+                                          const QString& plainText,
+                                          const QString& existingPath);
+    Q_INVOKABLE QString exportMedicalRecord(const QString& jsonText,
+                                            const QString& plainText,
+                                            const QString& existingPath);
+    Q_INVOKABLE QVariantList loadMedicalRecords() const;
+    Q_INVOKABLE bool deleteMedicalRecord(const QString& path);
 
 signals:
     void currentWordChanged();

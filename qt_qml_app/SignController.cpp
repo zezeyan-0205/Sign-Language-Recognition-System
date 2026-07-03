@@ -3,10 +3,16 @@
 #include "CameraView.hpp"
 
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QImage>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
 #include <QMetaObject>
+#include <QTextStream>
+#include <QVariantMap>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -46,15 +52,80 @@ QString latencySummary(const QJsonObject& latency)
         .arg(jsonNumber(latency, QStringLiteral("frame_age")));
 }
 
+QDir recordsDirectory()
+{
+    QDir dir(appProjectRoot());
+    dir.mkpath(QStringLiteral("artifacts/records"));
+    dir.cd(QStringLiteral("artifacts/records"));
+    return dir;
+}
+
+QString recordTimestamp()
+{
+    return QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmmss"));
+}
+
+QString displayTimestamp()
+{
+    return QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+}
+
+QString safeRecordPath(const QString& path)
+{
+    if (path.isEmpty()) {
+        return QString();
+    }
+
+    const QDir dir = recordsDirectory();
+    const QString canonicalDir = dir.canonicalPath();
+    const QFileInfo fileInfo(path);
+    const QString absolutePath = fileInfo.isAbsolute()
+        ? fileInfo.absoluteFilePath()
+        : dir.absoluteFilePath(path);
+    const QString cleanPath = QDir::cleanPath(absolutePath);
+    if (!canonicalDir.isEmpty() && !cleanPath.startsWith(canonicalDir)) {
+        return QString();
+    }
+    return cleanPath;
+}
+
+QString writeUtf8File(const QString& path, const QString& content)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        return QString();
+    }
+    QTextStream stream(&file);
+    stream.setCodec("UTF-8");
+    stream << content;
+    return path;
+}
+
+QJsonObject parseRecordJson(const QString& jsonText)
+{
+    QJsonParseError error;
+    const QJsonDocument document = QJsonDocument::fromJson(jsonText.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+        return {};
+    }
+    return document.object();
+}
+
+QString recordComplaint(const QJsonObject& object)
+{
+    return object.value(QStringLiteral("complaint")).toString(
+        object.value(QStringLiteral("chief_complaint")).toString(QStringLiteral("待患者表达后自动生成。")));
+}
+
 bool isRecognizedWordText(const QString& text)
 {
     return !text.isEmpty() &&
-           text != QStringLiteral("等待中...") &&
-           text != QStringLiteral("识别中...") &&
-           text != QStringLiteral("请患者站在识别框内") &&
-           text != QStringLiteral("等待手部进入识别区") &&
-           !text.contains(QStringLiteral("点击开始按钮")) &&
-           !text.contains(QStringLiteral("点击绿色按钮"));
+            text != QStringLiteral("等待中...") &&
+            text != QStringLiteral("识别中...") &&
+            text != QStringLiteral("请患者站在识别框内") &&
+            text != QStringLiteral("等待手部进入识别区") &&
+            !text.contains(QStringLiteral("点击开始按钮")) &&
+            !text.contains(QStringLiteral("点击绿色按钮"));
 }
 
 }  // namespace
@@ -92,6 +163,155 @@ void SignController::setDoctorCameraView(CameraView* cameraView)
 void SignController::bindDoctorCameraView(QObject* cameraView)
 {
     doctor_camera_view_ = qobject_cast<CameraView*>(cameraView);
+}
+
+QString SignController::saveMedicalRecord(const QString& jsonText,
+                                          const QString& plainText,
+                                          const QString& existingPath)
+{
+    QJsonObject object = parseRecordJson(jsonText);
+    if (object.isEmpty() && plainText.trimmed().isEmpty()) {
+        return QString();
+    }
+
+    const QDir dir = recordsDirectory();
+    const QString now = displayTimestamp();
+    object.insert(QStringLiteral("status"), QStringLiteral("已保存"));
+    object.insert(QStringLiteral("updated_at"), now);
+    if (!object.contains(QStringLiteral("created_at"))) {
+        object.insert(QStringLiteral("created_at"), now);
+    }
+    object.insert(QStringLiteral("saved_at"), now);
+    object.insert(QStringLiteral("plain_text"), plainText);
+
+    QString jsonPath = safeRecordPath(existingPath);
+    if (jsonPath.isEmpty()) {
+        jsonPath = dir.absoluteFilePath(QStringLiteral("record_%1.json").arg(recordTimestamp()));
+    }
+    const QString txtPath = QFileInfo(jsonPath).absolutePath() + QLatin1Char('/') +
+        QFileInfo(jsonPath).completeBaseName() + QStringLiteral(".txt");
+
+    QFile jsonFile(jsonPath);
+    if (!jsonFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        appendLog(QStringLiteral("record save failed: %1").arg(jsonPath));
+        return QString();
+    }
+    jsonFile.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
+    jsonFile.close();
+
+    if (writeUtf8File(txtPath, plainText).isEmpty()) {
+        appendLog(QStringLiteral("record text save failed: %1").arg(txtPath));
+    }
+    appendLog(QStringLiteral("record saved: %1").arg(jsonPath));
+    return jsonPath;
+}
+
+QString SignController::exportMedicalRecord(const QString& jsonText,
+                                            const QString& plainText,
+                                            const QString& existingPath)
+{
+    QJsonObject object = parseRecordJson(jsonText);
+    const QString jsonPath = safeRecordPath(existingPath);
+    if (jsonPath.isEmpty()) {
+        appendLog(QStringLiteral("record export rejected: record is not saved"));
+        return QString();
+    }
+
+    const QString now = displayTimestamp();
+    const QFileInfo info(jsonPath);
+    const QString path = info.absolutePath() + QLatin1Char('/') +
+        info.completeBaseName() + QStringLiteral("_export.txt");
+    QString content = plainText;
+    if (content.trimmed().isEmpty() && !object.isEmpty()) {
+        content = QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Indented));
+    }
+    if (writeUtf8File(path, content).isEmpty()) {
+        appendLog(QStringLiteral("record export failed: %1").arg(path));
+        return QString();
+    }
+
+    if (!object.isEmpty()) {
+        object.insert(QStringLiteral("status"), QStringLiteral("已导出"));
+        object.insert(QStringLiteral("exported_at"), now);
+        object.insert(QStringLiteral("updated_at"), now);
+        object.insert(QStringLiteral("plain_text"), plainText);
+        QFile jsonFile(jsonPath);
+        if (jsonFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            jsonFile.write(QJsonDocument(object).toJson(QJsonDocument::Indented));
+        }
+    }
+
+    appendLog(QStringLiteral("record exported: %1").arg(path));
+    return path;
+}
+
+QVariantList SignController::loadMedicalRecords() const
+{
+    QVariantList records;
+    const QDir dir = recordsDirectory();
+    const QFileInfoList files = dir.entryInfoList(
+        QStringList() << QStringLiteral("record_*.json"),
+        QDir::Files,
+        QDir::Time);
+
+    for (const QFileInfo& fileInfo : files) {
+        QFile file(fileInfo.absoluteFilePath());
+        if (!file.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        QJsonParseError error;
+        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &error);
+        if (error.error != QJsonParseError::NoError || !document.isObject()) {
+            continue;
+        }
+
+        const QJsonObject object = document.object();
+        QVariantMap record;
+        const QString savedAt = object.value(QStringLiteral("saved_at")).toString();
+        const QString exportedAt = object.value(QStringLiteral("exported_at")).toString();
+        const QString updatedAt = object.value(QStringLiteral("updated_at")).toString();
+        const QString createdAt = object.value(QStringLiteral("created_at")).toString();
+        record.insert(QStringLiteral("time"),
+                      !exportedAt.isEmpty() ? exportedAt :
+                      (!savedAt.isEmpty() ? savedAt :
+                      (!updatedAt.isEmpty() ? updatedAt : createdAt)));
+        record.insert(QStringLiteral("status"), object.value(QStringLiteral("status")).toString(QStringLiteral("已保存")));
+        record.insert(QStringLiteral("complaint"), recordComplaint(object));
+        record.insert(QStringLiteral("saved_at"), savedAt);
+        record.insert(QStringLiteral("exported_at"), exportedAt);
+        record.insert(QStringLiteral("updated_at"), updatedAt);
+        record.insert(QStringLiteral("created_at"), createdAt);
+        record.insert(QStringLiteral("plain_text"), object.value(QStringLiteral("plain_text")).toString());
+        record.insert(QStringLiteral("name"), object.value(QStringLiteral("name")).toString());
+        record.insert(QStringLiteral("gender"), object.value(QStringLiteral("gender")).toString());
+        record.insert(QStringLiteral("age"), object.value(QStringLiteral("age")).toString());
+        record.insert(QStringLiteral("record_no"), object.value(QStringLiteral("record_no")).toString());
+        record.insert(QStringLiteral("current_history"), object.value(QStringLiteral("current_history")).toString());
+        record.insert(QStringLiteral("doctor_note"), object.value(QStringLiteral("doctor_note")).toString());
+        record.insert(QStringLiteral("treatment_plan"), object.value(QStringLiteral("treatment_plan")).toString());
+        record.insert(QStringLiteral("doctor_signature"), object.value(QStringLiteral("doctor_signature")).toString());
+        record.insert(QStringLiteral("path"), fileInfo.absoluteFilePath());
+        records.append(record);
+    }
+    return records;
+}
+
+bool SignController::deleteMedicalRecord(const QString& path)
+{
+    const QString jsonPath = safeRecordPath(path);
+    if (jsonPath.isEmpty()) {
+        return false;
+    }
+    const QFileInfo info(jsonPath);
+    const QString txtPath = info.absolutePath() + QLatin1Char('/') + info.completeBaseName() + QStringLiteral(".txt");
+    const QString exportPath = info.absolutePath() + QLatin1Char('/') + info.completeBaseName() + QStringLiteral("_export.txt");
+    QFile::remove(txtPath);
+    QFile::remove(exportPath);
+    const bool removed = QFile::remove(jsonPath);
+    if (removed) {
+        appendLog(QStringLiteral("record deleted: %1").arg(jsonPath));
+    }
+    return removed;
 }
 
 void SignController::startSystem()
@@ -586,11 +806,11 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
     cap.set(cv::CAP_PROP_FPS, 30);
     cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
     // ========== 切换自动曝光（画面自动明暗调节）==========
-    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
+    // cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
 
     // ========== 切换手动曝光（固定亮度，不会忽亮忽暗）==========
-    // cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
-    // cap.set(cv::CAP_PROP_EXPOSURE, 400);
+    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
+    cap.set(cv::CAP_PROP_EXPOSURE, 200);
     // cap.set(cv::CAP_PROP_GAIN, 0);
     QMetaObject::invokeMethod(
         this,
