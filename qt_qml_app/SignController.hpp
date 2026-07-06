@@ -29,6 +29,8 @@ class SignController : public QObject {
     Q_PROPERTY(QString composerText READ composerText NOTIFY sentenceChanged)
     Q_PROPERTY(int collectProgress READ collectProgress NOTIFY progressChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(bool recordingActive READ recordingActive NOTIFY recordingChanged)
+    Q_PROPERTY(bool recordingPaused READ recordingPaused NOTIFY recordingChanged)
 
 public:
     explicit SignController(QObject* parent = nullptr);
@@ -46,10 +48,14 @@ public:
     QString composerText() const { return composer_text_; }
     int collectProgress() const { return collect_progress_; }
     bool running() const { return running_; }
+    bool recordingActive() const { return recording_active_.load(); }
+    bool recordingPaused() const { return recording_paused_; }
 
     Q_INVOKABLE void startSystem();
     Q_INVOKABLE void stopSystem();
     Q_INVOKABLE void startRecording();
+    Q_INVOKABLE void pauseRecording();
+    Q_INVOKABLE void resumeRecording();
     Q_INVOKABLE void stopRecording();
     Q_INVOKABLE void deleteLastToken();
     Q_INVOKABLE void clearExpression();
@@ -71,6 +77,7 @@ signals:
     void sentenceChanged();
     void progressChanged();
     void runningChanged();
+    void recordingChanged();
     void logLine(const QString& line);
 
 private slots:
@@ -143,6 +150,7 @@ private:
     QString composer_text_ = QStringLiteral("整理来源：-");
     int collect_progress_ = 0;
     std::atomic_bool recording_active_{false};
+    bool recording_paused_ = false;
     bool running_ = false;
 };
 

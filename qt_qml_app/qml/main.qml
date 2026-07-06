@@ -18,6 +18,9 @@ Window {
     property color danger: "#b73434"
     property var signController
     property var doctorReplyList: []
+    property bool doctorReplyPopupVisible: false
+    property string doctorReplyPopupText: ""
+    property string doctorReplyPopupTime: ""
     property bool patientExpanded: true
     property bool compactPatient: width <= 1100 || height <= 650
     property bool recognizing: signController.currentWord === "识别中..."
@@ -51,7 +54,7 @@ Window {
         if (state === "ready")
             return "点击开始后进行手语表达。"
         if (state === "collecting")
-            return "识别错误时可点击删除，完成后点击结束。"
+            return "识别错误时可点击删除，完成后点击整理。"
         if (state === "complete")
             return "点击开始后可继续表达下一句，或点击清空重新开始。"
         return "请根据页面状态进行操作。"
@@ -100,6 +103,12 @@ Window {
             lines.push(item.time + " 医生：" + item.text)
         }
         return lines.join("\n")
+    }
+
+    function showDoctorReplyPopup(reply) {
+        doctorReplyPopupText = reply.text
+        doctorReplyPopupTime = reply.time
+        doctorReplyPopupVisible = true
     }
 
     function isRecognizedWord(text) {
@@ -310,17 +319,6 @@ Window {
                         }
                     }
 
-                    StatusPill {
-                        anchors.left: parent.left
-                        anchors.leftMargin: compactPatient ? 10 : 14
-                        anchors.top: parent.top
-                        anchors.topMargin: compactPatient ? 10 : 14
-                        width: compactPatient ? 138 : 176
-                        height: compactPatient ? 30 : 36
-                        text: theme.stateTitle(businessState())
-                        accent: stateAccent()
-                    }
-
                     Rectangle {
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -489,18 +487,26 @@ Window {
                     MedicalButton {
                         width: parent.width / 2 - (compactPatient ? 4 : 7)
                         height: parent.height
-                        label: "开始"
+                        label: signController.recordingActive ? "暂停" : (signController.recordingPaused ? "继续" : "开始")
                         fontSize: compactPatient ? 24 : 34
                         primaryAction: true
-                        activeColor: "#2f9fd0"
+                        activeColor: signController.recordingActive ? "#d89a35" : "#2f9fd0"
                         inactiveColor: theme.disabled
                         enabled: signController.running
-                        onClicked: signController.startRecording()
+                        onClicked: {
+                            if (signController.recordingActive) {
+                                signController.pauseRecording()
+                            } else if (signController.recordingPaused) {
+                                signController.resumeRecording()
+                            } else {
+                                signController.startRecording()
+                            }
+                        }
                     }
                     MedicalButton {
                         width: parent.width / 2 - (compactPatient ? 4 : 7)
                         height: parent.height
-                        label: "结束"
+                        label: "整理"
                         fontSize: compactPatient ? 24 : 34
                         primaryAction: true
                         activeColor: "#176f9f"
@@ -578,6 +584,86 @@ Window {
         }
     }
 
+    Rectangle {
+        anchors.fill: parent
+        visible: patientWindow.doctorReplyPopupVisible
+        color: "#66000000"
+        z: 80
+
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.AllButtons
+        }
+
+        Rectangle {
+            width: compactPatient ? Math.min(parent.width - 80, 620) : Math.min(parent.width - 160, 760)
+            height: compactPatient ? 310 : 390
+            anchors.centerIn: parent
+            radius: 12
+            color: "#ffffff"
+            border.width: 2
+            border.color: "#2d8dc2"
+
+            Column {
+                anchors.fill: parent
+                anchors.margins: compactPatient ? 22 : 30
+                spacing: compactPatient ? 14 : 20
+
+                Text {
+                    width: parent.width
+                    text: "医生回复"
+                    color: "#15324a"
+                    font.pixelSize: compactPatient ? 26 : 34
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                }
+
+                Text {
+                    width: parent.width
+                    text: patientWindow.doctorReplyPopupTime.length > 0
+                          ? patientWindow.doctorReplyPopupTime + " 医生发送"
+                          : "医生发送"
+                    color: "#6b7b88"
+                    font.pixelSize: compactPatient ? 15 : 18
+                    horizontalAlignment: Text.AlignHCenter
+                }
+
+                Rectangle {
+                    width: parent.width
+                    height: compactPatient ? 120 : 160
+                    radius: 8
+                    color: "#f1f7fb"
+                    border.width: 1
+                    border.color: "#c7ddea"
+
+                    Text {
+                        anchors.fill: parent
+                        anchors.margins: compactPatient ? 16 : 22
+                        text: patientWindow.doctorReplyPopupText.length > 0
+                              ? patientWindow.doctorReplyPopupText
+                              : "暂无医生回复"
+                        color: "#17324d"
+                        font.pixelSize: compactPatient ? 24 : 30
+                        font.bold: true
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
+                MedicalButton {
+                    width: parent.width
+                    height: compactPatient ? 58 : 72
+                    label: "确认收到"
+                    fontSize: compactPatient ? 22 : 28
+                    activeColor: "#2d8dc2"
+                    primaryAction: true
+                    onClicked: patientWindow.doctorReplyPopupVisible = false
+                }
+            }
+        }
+    }
+
     Window {
         id: doctorWindow
         width: 1440
@@ -613,6 +699,7 @@ Window {
         property string treatmentPlan: ""
         property string doctorSignature: ""
         property string doctorReplyDraft: ""
+        property int nextComplaintReplyIndex: 0
         property bool disconnectedWarning: false
         property int navWidth: 108
         property int currentPageIndex: 0
@@ -624,8 +711,7 @@ Window {
         property var navItems: [
             { "title": "工作台首页", "icon": "qrc:/qml/icons/nav_home.svg" },
             { "title": "病历档案", "icon": "qrc:/qml/icons/nav_record.svg" },
-            { "title": "手语实时识别", "icon": "qrc:/qml/icons/nav_sign.svg" },
-            { "title": "退出登录", "icon": "qrc:/qml/icons/nav_power.svg" }
+            { "title": "手语实时识别", "icon": "qrc:/qml/icons/nav_sign.svg" }
         ]
 
         Component.onCompleted: {
@@ -739,13 +825,25 @@ Window {
                 }
             }
 
-            SidebarIconButton {
+            Column {
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 24
-                iconSource: "qrc:/qml/icons/nav_settings.svg"
-                active: settingsDialog.opened
-                onClicked: settingsDialog.opened = true
+                spacing: 12
+
+                SidebarIconButton {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    iconSource: "qrc:/qml/icons/nav_settings.svg"
+                    active: settingsDialog.opened
+                    onClicked: settingsDialog.opened = true
+                }
+
+                SidebarIconButton {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    iconSource: "qrc:/qml/icons/nav_power.svg"
+                    active: false
+                    onClicked: Qt.quit()
+                }
             }
         }
 
@@ -974,13 +1072,6 @@ Window {
                                         elide: Text.ElideRight
                                     }
 
-                                    Text {
-                                        width: parent.width
-                                        text: doctorWindow.currentEditingLabel()
-                                        color: doctorWindow.recordDirty ? "#b36b23" : "#667085"
-                                        font.pixelSize: 16
-                                        elide: Text.ElideRight
-                                    }
                                 }
                             }
 
@@ -2637,11 +2728,6 @@ Window {
         }
 
         function selectDoctorPage(index) {
-            if (index === 3) {
-                Qt.quit()
-                return
-            }
-
             currentPageIndex = index
             if (index === 0) {
                 doctorStack.replace(doctorHomeComponent)
@@ -2764,9 +2850,30 @@ Window {
 	            return complaintList.length > 0
 	        }
 
-	        function recordComplaintText() {
-	            return complaintList.join("\n")
-	        }
+        function recordComplaintText() {
+            return complaintList.join("\n")
+        }
+
+        function normalizeDoctorQuestion(text) {
+            var question = text.trim()
+            while (question.length > 0) {
+                var last = question.charAt(question.length - 1)
+                if (last === "?" || last === "？" || last === "。" || last === "：" || last === ":" ||
+                    last === "，" || last === "," || last === "！" || last === "!")
+                    question = question.substring(0, question.length - 1)
+                else
+                    break
+            }
+            return question
+        }
+
+        function pendingDoctorQuestion() {
+            if (nextComplaintReplyIndex < 0)
+                nextComplaintReplyIndex = 0
+            if (nextComplaintReplyIndex >= patientWindow.doctorReplyList.length)
+                return ""
+            return normalizeDoctorQuestion(patientWindow.doctorReplyList[nextComplaintReplyIndex].text)
+        }
 
         function tokenSummaryText() {
             var text = patientWindow.cleanTokens()
@@ -2778,12 +2885,6 @@ Window {
             var device = signController.statusText === "错误" ? "设备异常" : "设备正常"
             var record = recordDirty ? "病历待保存" : (exportedAt !== "尚未导出" ? "已导出" : (lastSavedAt === "尚未保存" ? "病历待保存" : "已保存"))
             return "● " + state + "｜" + device + "｜" + record
-        }
-
-        function currentEditingLabel() {
-            var title = patientName.length > 0 ? patientName : (recordNo.length > 0 ? "病历号 " + recordNo : "未命名病历")
-            var state = recordDirty ? "未保存修改" : (exportedAt !== "尚未导出" ? "已导出" : (lastSavedAt === "尚未保存" ? "待保存" : "已保存"))
-            return "当前编辑：" + title + " / " + state
         }
 
         function markRecordDirty() {
@@ -3042,6 +3143,7 @@ Window {
             recordDraft = record.plain_text && record.plain_text.length > 0 ? record.plain_text : buildRecordText()
             lastSavedAt = record.saved_at && record.saved_at.length > 0 ? record.saved_at : record.time
             exportedAt = record.exported_at && record.exported_at.length > 0 ? record.exported_at : "尚未导出"
+            nextComplaintReplyIndex = patientWindow.doctorReplyList.length
             recordDirty = false
             suppressRecordDirty = false
             recordStatus = record.status && record.status.length > 0 ? "已加载历史病历：" + record.status : "已加载历史病历"
@@ -3205,6 +3307,11 @@ Window {
 	            doctorNote = ""
 	            treatmentPlan = ""
 	            doctorSignature = ""
+	            patientWindow.doctorReplyList = []
+	            patientWindow.doctorReplyPopupVisible = false
+	            patientWindow.doctorReplyPopupText = ""
+	            patientWindow.doctorReplyPopupTime = ""
+	            nextComplaintReplyIndex = 0
 	            recordStatus = "已新建空白病历，可继续采集手语主诉"
             lastSavedAt = "尚未保存"
             exportedAt = "尚未导出"
@@ -3263,6 +3370,7 @@ Window {
 	            doctorNote = ""
 	            treatmentPlan = ""
 	            doctorSignature = ""
+	            nextComplaintReplyIndex = patientWindow.doctorReplyList.length
 	            recordStatus = "病历草稿已清空"
             exportedAt = "尚未导出"
             recordDirty = false
@@ -3277,12 +3385,16 @@ Window {
 	                doctorToast = "暂无可写入内容"
 	                return
 	            }
-		            if (currentComplaint === lastWrittenComplaint || complaintList.indexOf(currentComplaint) >= 0) {
+	            var question = pendingDoctorQuestion()
+	            var recordLine = question.length > 0 ? question + "：" + currentComplaint : currentComplaint
+		            if (recordLine === lastWrittenComplaint || complaintList.indexOf(recordLine) >= 0) {
 		                doctorToast = "当前主诉已写入"
 		                return
 		            }
-	            complaintList = complaintList.concat([currentComplaint])
-	            lastWrittenComplaint = currentComplaint
+	            complaintList = complaintList.concat([recordLine])
+	            lastWrittenComplaint = recordLine
+	            if (question.length > 0)
+	                nextComplaintReplyIndex = patientWindow.doctorReplyList.length
 	            recordDraft = buildRecordText()
 	            lastSavedAt = "尚未保存"
 	            recordDirty = true
@@ -3303,8 +3415,8 @@ Window {
                 return
             }
             if (hasChiefComplaint()) {
-                recordStatus = "已保留当前主诉，可让患者重新表达后再次结束整理"
-                doctorToast = "请患者重新表达后点击结束"
+                recordStatus = "已保留当前主诉，可让患者重新表达后再次整理"
+                doctorToast = "请患者重新表达后点击整理"
             } else {
                 doctorToast = "等待患者手语输入"
             }
@@ -3323,10 +3435,12 @@ Window {
 	                doctorToast = "请输入回复内容"
 	                return
 	            }
-	            patientWindow.doctorReplyList = patientWindow.doctorReplyList.concat([{
+	            var reply = {
 	                "time": timeText().substring(0, 5),
 	                "text": text
-	            }])
+	            }
+	            patientWindow.doctorReplyList = patientWindow.doctorReplyList.concat([reply])
+	            patientWindow.showDoctorReplyPopup(reply)
 	            doctorReplyDraft = ""
 	            doctorToast = "已发送给患者"
 	        }

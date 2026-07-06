@@ -292,7 +292,7 @@ def main():
     cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
 
     # 调低曝光，数值越小通常越暗
-    cap.set(cv2.CAP_PROP_EXPOSURE, 200)
+    cap.set(cv2.CAP_PROP_EXPOSURE, 400)
 
     # 可选：降低增益，避免画面又亮又糊
     cap.set(cv2.CAP_PROP_GAIN, 0)

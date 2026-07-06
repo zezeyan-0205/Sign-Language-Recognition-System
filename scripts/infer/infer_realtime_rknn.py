@@ -88,11 +88,14 @@ ROI_MODE_BODY_HAND = "BODY_HAND"
 ROI_MODE_POSE_LOST = "POSE_LOST"
 
 # 预测稳定参数
-CONF_THRESHOLD = 0.72      # 低于这个置信度，显示“识别中...”
-SMOOTH_WINDOW = 6          # 最近6次预测做投票
-MIN_VOTE_COUNT = 4         # 至少4票一致才更新显示
-TOKEN_ADD_INTERVAL = 0.8
+CONF_THRESHOLD = 0.65      # 演示优先：低于这个置信度，显示“识别中...”
+SMOOTH_WINDOW = 5          # 最近5次预测做投票
+MIN_VOTE_COUNT = 3         # 至少3票一致才更新显示
+TOKEN_ADD_INTERVAL = 1.5
+TOKEN_UNLOCK_HAND_LOST_SEC = 0.50
+RECORDING_WARMUP_SEC = 0.60
 DELETE_READD_GRACE = 0.35
+RECOGNITION_STALE_SEC = 2.8
 # ================= MediaPipe =================
 BaseOptions = mp.tasks.BaseOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
@@ -1085,9 +1088,14 @@ def main():
     last_json_time = 0.0
     last_preview_time = 0.0
     recording = False
+    recording_started_at = 0.0
     token_buffer = []
     last_added_token = ""
     last_added_time = 0.0
+    token_locked = False
+    lock_hand_lost_since = 0.0
+    last_locked_skip_token = ""
+    recognition_wait_started_at = 0.0
     deleted_token = ""
     deleted_until = 0.0
     last_sentence = ""
@@ -1144,9 +1152,23 @@ def main():
                 cmd = command.get("cmd")
                 if cmd == "start_recording":
                     recording = True
+                    recording_started_at = time.time()
+                    sequence.clear()
+                    pred_history.clear()
+                    last_pose_result = None
+                    last_hand_result = None
+                    dynamic_roi_tracker = DynamicRoiTracker()
+                    display_pred = "等待中..."
+                    display_conf = 0.0
+                    last_valid_hand_time = 0.0
+                    hand_lost_frames = 0
                     token_buffer = []
                     last_added_token = ""
                     last_added_time = 0.0
+                    token_locked = False
+                    lock_hand_lost_since = 0.0
+                    last_locked_skip_token = ""
+                    recognition_wait_started_at = 0.0
                     deleted_token = ""
                     deleted_until = 0.0
                     last_sentence = ""
@@ -1154,6 +1176,8 @@ def main():
                     emit_json("recording", active=True, tokens=token_buffer)
                 elif cmd == "stop_recording":
                     recording = False
+                    recording_started_at = 0.0
+                    recognition_wait_started_at = 0.0
                     last_sentence, last_sentence_source = compose_sentence_with_source(
                         token_buffer,
                         backend=args.composer,
@@ -1167,11 +1191,50 @@ def main():
                         sentence=last_sentence,
                         composer=last_sentence_source,
                     )
+                elif cmd == "pause_recording":
+                    recording = False
+                    recording_started_at = 0.0
+                    sequence.clear()
+                    pred_history.clear()
+                    display_pred = "已暂停"
+                    display_conf = 0.0
+                    last_valid_hand_time = 0.0
+                    hand_lost_frames = 0
+                    token_locked = False
+                    lock_hand_lost_since = 0.0
+                    last_locked_skip_token = ""
+                    recognition_wait_started_at = 0.0
+                    emit_json("recording", active=False, paused=True, tokens=token_buffer)
+                elif cmd == "resume_recording":
+                    recording = True
+                    recording_started_at = time.time()
+                    sequence.clear()
+                    pred_history.clear()
+                    display_pred = "等待中..."
+                    display_conf = 0.0
+                    last_valid_hand_time = 0.0
+                    hand_lost_frames = 0
+                    token_locked = False
+                    lock_hand_lost_since = 0.0
+                    last_locked_skip_token = ""
+                    recognition_wait_started_at = 0.0
+                    emit_json("recording", active=True, paused=False, tokens=token_buffer)
                 elif cmd == "clear":
                     recording = False
+                    recording_started_at = 0.0
+                    sequence.clear()
+                    pred_history.clear()
+                    display_pred = "等待中..."
+                    display_conf = 0.0
+                    last_valid_hand_time = 0.0
+                    hand_lost_frames = 0
                     token_buffer = []
                     last_added_token = ""
                     last_added_time = 0.0
+                    token_locked = False
+                    lock_hand_lost_since = 0.0
+                    last_locked_skip_token = ""
+                    recognition_wait_started_at = 0.0
                     deleted_token = ""
                     deleted_until = 0.0
                     last_sentence = ""
@@ -1180,11 +1243,22 @@ def main():
                     emit_json("sentence", tokens=token_buffer, sentence=last_sentence, composer=last_sentence_source)
                 elif cmd == "delete_last":
                     removed_token = token_buffer.pop() if token_buffer else ""
+                    recording_started_at = time.time()
+                    sequence.clear()
+                    pred_history.clear()
+                    display_pred = "等待中..."
+                    display_conf = 0.0
+                    last_valid_hand_time = 0.0
+                    hand_lost_frames = 0
                     # 删除后只短暂防抖，允许用户重新做同一个词。
                     deleted_token = removed_token
                     deleted_until = time.time() + DELETE_READD_GRACE if removed_token else 0.0
                     last_added_token = token_buffer[-1] if token_buffer else ""
                     last_added_time = 0.0
+                    token_locked = False
+                    lock_hand_lost_since = 0.0
+                    last_locked_skip_token = ""
+                    recognition_wait_started_at = 0.0
                     last_sentence = ""
                     last_sentence_source = ""
                     emit_json("tokens", tokens=token_buffer)
@@ -1251,21 +1325,33 @@ def main():
                 sequence.append((now, keypoints))
                 last_valid_hand_time = now
                 hand_lost_frames = 0
+                lock_hand_lost_since = 0.0
             else:
                 hand_lost_frames += 1
+                if token_locked:
+                    if lock_hand_lost_since <= 0:
+                        lock_hand_lost_since = now
+                    elif now - lock_hand_lost_since >= TOKEN_UNLOCK_HAND_LOST_SEC:
+                        token_locked = False
+                        lock_hand_lost_since = 0.0
+                        last_locked_skip_token = ""
+                        print("token unlocked by hand lost", file=sys.stderr, flush=True)
                 # MediaPipe 会偶发丢手一两帧，短暂丢失时保留当前窗口，避免进度条反复归零。
                 if last_valid_hand_time <= 0 or now - last_valid_hand_time > HAND_LOST_GRACE_SEC:
                     sequence.clear()
                     pred_history.clear()
                     display_pred = "等待中..."
                     display_conf = 0.0
+                    recognition_wait_started_at = 0.0
             if not target_pose_valid:
                 display_pred = "请患者站在识别框内"
                 display_conf = 0.0
                 pred_history.clear()
+                recognition_wait_started_at = 0.0
             elif valid_hand_count == 0 and not hands_valid:
                 display_pred = "等待手部进入识别区"
                 display_conf = 0.0
+                recognition_wait_started_at = 0.0
 
             # 只保留最近 WINDOW_SEC 秒的数据
             while sequence and now - sequence[0][0] > WINDOW_SEC:
@@ -1329,21 +1415,46 @@ def main():
                         display_pred = "识别中..."
                         display_conf = raw_conf
 
-            if (
+            if recording and ready_to_predict and display_pred == "识别中...":
+                if recognition_wait_started_at <= 0:
+                    recognition_wait_started_at = now
+                elif now - recognition_wait_started_at >= RECOGNITION_STALE_SEC:
+                    sequence.clear()
+                    pred_history.clear()
+                    display_pred = "等待中..."
+                    display_conf = 0.0
+                    recognition_wait_started_at = 0.0
+                    print("recognition window reset after stale predictions", file=sys.stderr, flush=True)
+            elif display_pred != "识别中...":
+                recognition_wait_started_at = 0.0
+
+            stable_token_candidate = (
                 recording and
+                now - recording_started_at >= RECORDING_WARMUP_SEC and
                 display_pred not in ("等待中...", "识别中...", "请患者站在识别框内", "等待手部进入识别区") and
                 display_conf >= CONF_THRESHOLD and
                 display_pred != last_added_token and
                 not (display_pred == deleted_token and now < deleted_until) and
                 now - last_added_time >= TOKEN_ADD_INTERVAL
-            ):
-                token_buffer.append(display_pred)
-                last_added_token = display_pred
-                last_added_time = now
-                if display_pred == deleted_token:
-                    deleted_token = ""
-                    deleted_until = 0.0
-                emit_json("tokens", tokens=token_buffer)
+            )
+            if stable_token_candidate:
+                if token_locked:
+                    if display_pred != last_locked_skip_token:
+                        print(f"skip token because locked: {display_pred}", file=sys.stderr, flush=True)
+                        last_locked_skip_token = display_pred
+                else:
+                    token_buffer.append(display_pred)
+                    last_added_token = display_pred
+                    last_added_time = now
+                    token_locked = True
+                    lock_hand_lost_since = 0.0
+                    last_locked_skip_token = ""
+                    recognition_wait_started_at = 0.0
+                    print(f"token locked after add: {display_pred}", file=sys.stderr, flush=True)
+                    if display_pred == deleted_token:
+                        deleted_token = ""
+                        deleted_until = 0.0
+                    emit_json("tokens", tokens=token_buffer)
 
             if args.json_output and now - last_json_time >= args.json_interval:
                 dynamic_roi = tracking_debug.get("dynamic_roi")

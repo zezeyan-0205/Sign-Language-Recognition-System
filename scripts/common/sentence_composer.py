@@ -5,8 +5,11 @@ import urllib.error
 import urllib.request
 
 
-TIME_WORDS = ("今天", "昨天", "现在", "明天")
+DAY_WORDS = ("今天", "昨天", "现在", "明天")
+DAY_PERIOD_WORDS = ("早上", "中午", "下午", "晚上")
+TIME_WORDS = (*DAY_WORDS, *DAY_PERIOD_WORDS)
 NUMBER_WORDS = tuple(str(index) for index in range(1, 10))
+REPEATABLE_TOKENS = set(NUMBER_WORDS) | {"小时", "天", "次"}
 FILLER_TOKENS = {"我", "一起", "可以", "发生"}
 
 DIRECT_SYMPTOMS = {
@@ -28,13 +31,27 @@ GENERIC_SYMPTOMS = {
     "流血": ("流血", ("流血",)),
 }
 
+PAIR_IGNORE_TOKENS = set(TIME_WORDS) | {"我", "一起", "可以", "发生", "没有", "不", "经常"} | set(NUMBER_WORDS) | {"小时", "天", "次", "到"}
+
 
 def compact_tokens(tokens):
     compact = []
     for token in tokens:
-        if token and token not in compact:
+        if token and (token not in compact or token in REPEATABLE_TOKENS):
             compact.append(token)
     return compact
+
+
+def compact_symptom_tokens(tokens):
+    return [token for token in compact_tokens(tokens) if token not in PAIR_IGNORE_TOKENS]
+
+
+def has_adjacent_pair(tokens, first, second):
+    symptom_tokens = compact_symptom_tokens(tokens)
+    return any(
+        symptom_tokens[index] == first and symptom_tokens[index + 1] == second
+        for index in range(len(symptom_tokens) - 1)
+    )
 
 
 def time_phrase(tokens):
@@ -45,6 +62,9 @@ def time_phrase(tokens):
             after = [item for item in time_positions if item[0] > tokens.index("到")]
             if before and after:
                 return f"从{before[-1][1]}到{after[0][1]}"
+    for index, token in enumerate(tokens[:-1]):
+        if token in DAY_WORDS and tokens[index + 1] in DAY_PERIOD_WORDS:
+            return f"{token}{tokens[index + 1]}"
     for token in tokens:
         if token in TIME_WORDS:
             return token
@@ -53,10 +73,11 @@ def time_phrase(tokens):
 
 def modifier_phrase(tokens):
     token_set = set(tokens)
-    if "不" in token_set and "经常" in token_set:
+    negative = "不" in token_set or "没有" in token_set
+    if negative and "经常" in token_set:
         return "不经常"
-    if "不" in token_set:
-        return "不"
+    if negative:
+        return "没有"
     if "经常" in token_set:
         return "经常"
     return ""
@@ -65,8 +86,8 @@ def modifier_phrase(tokens):
 def decorate_symptom(symptom, modifier):
     if modifier == "不经常":
         return f"不经常{symptom}"
-    if modifier == "不":
-        return f"不{symptom}"
+    if modifier == "没有":
+        return f"没有{symptom}"
     if modifier == "经常":
         return f"经常{symptom}"
     return symptom
@@ -78,7 +99,8 @@ def symptom_slots(tokens):
     consumed = set()
 
     for required_tokens, phrase, allowed_outputs in COMPOUND_SYMPTOMS:
-        if all(token in token_set for token in required_tokens):
+        first, second = required_tokens
+        if has_adjacent_pair(tokens, first, second):
             slots.append({"phrase": phrase, "allowed": allowed_outputs})
             consumed.update(required_tokens)
 
@@ -103,14 +125,22 @@ def time_segments(tokens):
     segments = []
     current_time = ""
     current_tokens = []
-    for token in tokens:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
         if token in TIME_WORDS:
             if current_time or current_tokens:
                 segments.append((current_time, current_tokens))
+            if token in DAY_WORDS and index + 1 < len(tokens) and tokens[index + 1] in DAY_PERIOD_WORDS:
+                current_time = f"{token}{tokens[index + 1]}"
+                index += 2
+                current_tokens = []
+                continue
             current_time = token
             current_tokens = []
         else:
             current_tokens.append(token)
+        index += 1
     if current_time or current_tokens:
         segments.append((current_time, current_tokens))
     return segments
@@ -118,7 +148,7 @@ def time_segments(tokens):
 
 def duration_phrase(tokens):
     for index, token in enumerate(tokens[:-1]):
-        if token in NUMBER_WORDS and tokens[index + 1] in ("小时", "天"):
+        if token in NUMBER_WORDS and tokens[index + 1] in ("小时", "天", "次"):
             return f"{token}{tokens[index + 1]}"
     return ""
 
@@ -166,13 +196,18 @@ def compose_tokens_rule(tokens):
         for segment_time, segment_tokens in time_segments(compact):
             segment_slots = extract_slots(segment_tokens)
             segment_symptoms = format_symptoms(segment_slots["symptoms"], segment_slots["modifier"])
+            segment_duration = segment_slots["duration"]
             if segment_time and segment_symptoms:
-                segment_duration = segment_slots["duration"]
                 segment_text = join_symptoms(segment_symptoms, set(segment_tokens))
                 timed_parts.append(f"{segment_time}{segment_text}{segment_duration}")
+            elif segment_time and segment_duration:
+                timed_parts.append(f"{segment_time}{segment_duration}")
 
     if len(timed_parts) >= 2:
         return f"{subject}{'，'.join(timed_parts)}。"
+
+    if timed_parts and not symptoms:
+        return f"{subject}{timed_parts[0]}。"
 
     if symptoms:
         return f"{subject}{time_word}{join_symptoms(symptoms, token_set)}{duration}。"
@@ -239,7 +274,7 @@ def sentence_matches_tokens(sentence, tokens):
         if range_text:
             checks.append((range_text,))
     checks.append((slots["subject"],))
-    if "不" in token_set:
+    if "不" in token_set or "没有" in token_set:
         checks.append(("不", "没有"))
     if "经常" in token_set:
         checks.append(("经常",))

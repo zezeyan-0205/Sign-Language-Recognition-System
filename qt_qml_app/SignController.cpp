@@ -272,9 +272,9 @@ QVariantList SignController::loadMedicalRecords() const
         const QString updatedAt = object.value(QStringLiteral("updated_at")).toString();
         const QString createdAt = object.value(QStringLiteral("created_at")).toString();
         record.insert(QStringLiteral("time"),
-                      !exportedAt.isEmpty() ? exportedAt :
-                      (!savedAt.isEmpty() ? savedAt :
-                      (!updatedAt.isEmpty() ? updatedAt : createdAt)));
+                    !exportedAt.isEmpty() ? exportedAt :
+                    (!savedAt.isEmpty() ? savedAt :
+                    (!updatedAt.isEmpty() ? updatedAt : createdAt)));
         record.insert(QStringLiteral("status"), object.value(QStringLiteral("status")).toString(QStringLiteral("已保存")));
         record.insert(QStringLiteral("complaint"), recordComplaint(object));
         record.insert(QStringLiteral("saved_at"), savedAt);
@@ -332,12 +332,14 @@ void SignController::startSystem()
     sentence_text_ = QStringLiteral("整理句子：-");
     composer_text_ = QStringLiteral("整理来源：-");
     recording_active_.store(false);
+    recording_paused_ = false;
     has_collected_tokens_ = false;
     setProgress(0);
     emit currentWordChanged();
     emit metricsChanged();
     emit tokensChanged();
     emit sentenceChanged();
+    emit recordingChanged();
 
     worker_.setWorkingDirectory(appProjectRoot());
     worker_.setProcessChannelMode(QProcess::SeparateChannels);
@@ -357,6 +359,7 @@ void SignController::startSystem()
 void SignController::stopSystem()
 {
     recording_active_.store(false);
+    recording_paused_ = false;
     intentional_stop_ = true;
     if (worker_.state() != QProcess::NotRunning) {
         worker_.terminate();
@@ -371,6 +374,7 @@ void SignController::stopSystem()
     stopLocalPreview();
     setRunning(false);
     setStatus(QStringLiteral("已停止"));
+    emit recordingChanged();
 }
 
 void SignController::startRecording()
@@ -380,19 +384,59 @@ void SignController::startRecording()
     composer_text_ = QStringLiteral("整理来源：-");
     current_word_ = QStringLiteral("等待中...");
     recording_active_.store(true);
+    recording_paused_ = false;
     has_collected_tokens_ = false;
     setProgress(0);
     setStatus(QStringLiteral("等待手部"));
     emit currentWordChanged();
     emit tokensChanged();
     emit sentenceChanged();
+    emit recordingChanged();
     sendWorkerCommand(QStringLiteral("start_recording"));
+}
+
+void SignController::pauseRecording()
+{
+    if (!recording_active_.load()) {
+        return;
+    }
+
+    recording_active_.store(false);
+    recording_paused_ = true;
+    current_word_ = QStringLiteral("已暂停");
+    sentence_text_ = QStringLiteral("整理句子：已暂停，可点击继续接着识别");
+    setProgress(0);
+    setStatus(QStringLiteral("已暂停"));
+    emit currentWordChanged();
+    emit sentenceChanged();
+    emit recordingChanged();
+    sendWorkerCommand(QStringLiteral("pause_recording"));
+}
+
+void SignController::resumeRecording()
+{
+    if (!running_ || !recording_paused_) {
+        return;
+    }
+
+    recording_active_.store(true);
+    recording_paused_ = false;
+    current_word_ = QStringLiteral("等待中...");
+    sentence_text_ = has_collected_tokens_
+        ? QStringLiteral("整理句子：继续识别中...")
+        : QStringLiteral("整理句子：表达中...");
+    setProgress(0);
+    setStatus(QStringLiteral("等待手部"));
+    emit currentWordChanged();
+    emit sentenceChanged();
+    emit recordingChanged();
+    sendWorkerCommand(QStringLiteral("resume_recording"));
 }
 
 void SignController::stopRecording()
 {
     if (!has_collected_tokens_) {
-        sentence_text_ = QStringLiteral("整理句子：请先进行手语识别后再按结束按钮");
+        sentence_text_ = QStringLiteral("整理句子：请先进行手语识别后再按整理按钮");
         setStatus(QStringLiteral("请先完成至少一个词汇识别"));
         emit sentenceChanged();
         appendLog(QStringLiteral("stop ignored: no recognized tokens"));
@@ -400,8 +444,10 @@ void SignController::stopRecording()
     }
 
     recording_active_.store(false);
+    recording_paused_ = false;
     sentence_text_ = QStringLiteral("整理句子：正在整理...");
     emit sentenceChanged();
+    emit recordingChanged();
     sendWorkerCommand(QStringLiteral("stop_recording"));
 }
 
@@ -426,6 +472,7 @@ void SignController::deleteLastToken()
 void SignController::clearExpression()
 {
     recording_active_.store(false);
+    recording_paused_ = false;
     has_collected_tokens_ = false;
     current_word_ = worker_.state() == QProcess::NotRunning
         ? QStringLiteral("等待中...")
@@ -438,6 +485,7 @@ void SignController::clearExpression()
     emit currentWordChanged();
     emit tokensChanged();
     emit sentenceChanged();
+    emit recordingChanged();
     sendWorkerCommand(QStringLiteral("clear"));
 }
 
@@ -594,7 +642,9 @@ void SignController::consumeJson(const QJsonObject& object)
 
     if (type == QStringLiteral("recording")) {
         const bool active = object.value(QStringLiteral("active")).toBool(false);
+        const bool paused = object.value(QStringLiteral("paused")).toBool(false);
         recording_active_.store(active);
+        recording_paused_ = paused;
         const QStringList tokens = jsonTokens(object.value(QStringLiteral("tokens")).toArray());
         has_collected_tokens_ = !tokens.isEmpty();
         if (has_collected_tokens_) {
@@ -602,9 +652,10 @@ void SignController::consumeJson(const QJsonObject& object)
         } else {
             setProgress(0);
         }
-        setStatus(active ? QStringLiteral("表达采集中") : QStringLiteral("点击开始按钮开始识别"));
+        setStatus(paused ? QStringLiteral("已暂停") : (active ? QStringLiteral("表达采集中") : QStringLiteral("点击开始按钮开始识别")));
         tokens_text_ = tokensDisplayText(object.value(QStringLiteral("tokens")).toArray());
         emit tokensChanged();
+        emit recordingChanged();
         return;
     }
 
@@ -691,7 +742,12 @@ void SignController::consumeJson(const QJsonObject& object)
     latest_sequence_frames_.store(sequence_frames, std::memory_order_relaxed);
     latest_hand_lost_frames_.store(hand_lost_frames, std::memory_order_relaxed);
     latest_window_sec_milli_.store(static_cast<int>(window_sec * 1000.0), std::memory_order_relaxed);
-    const int window_progress = qBound(0, static_cast<int>((window_sec / 1.5) * 100.0), 100);
+    int window_progress = qBound(0, static_cast<int>((window_sec / 1.5) * 100.0), 100);
+    if (recording_active_.load(std::memory_order_relaxed) &&
+        current_word_ == QStringLiteral("识别中...") &&
+        window_progress > 0) {
+        window_progress = std::max(collect_progress_, window_progress);
+    }
     setProgress(isRecognizedWordText(current_word_) ? 100 : window_progress);
     if (!tracking_status.isEmpty()) {
         setStatus(tracking_status);
@@ -806,12 +862,13 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
     cap.set(cv::CAP_PROP_FPS, 30);
     cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
     // ========== 切换自动曝光（画面自动明暗调节）==========
-    // cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
+    //cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
 
     // ========== 切换手动曝光（固定亮度，不会忽亮忽暗）==========
     cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
-    cap.set(cv::CAP_PROP_EXPOSURE, 200);
-    // cap.set(cv::CAP_PROP_GAIN, 0);
+    cap.set(cv::CAP_PROP_EXPOSURE, 400);
+    //cap.set(cv::CAP_PROP_GAIN, 0);
+
     QMetaObject::invokeMethod(
         this,
         [this, exposure = cap.get(cv::CAP_PROP_EXPOSURE), gain = cap.get(cv::CAP_PROP_GAIN)]() {
@@ -847,31 +904,7 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
                 cv::Scalar(255, 255, 0),
                 3);
 
-            cv::Mat doctor_display = base_display.clone();
-            bool has_dynamic_roi = false;
-            double dynamic_roi[4] = {0.15, 0.0, 0.85, 1.0};
-            {
-                std::lock_guard<std::mutex> lock(preview_mutex_);
-                has_dynamic_roi = has_dynamic_roi_;
-                std::copy(std::begin(dynamic_roi_), std::end(dynamic_roi_), std::begin(dynamic_roi));
-            }
-            const auto drawNormBox = [&doctor_display](const double* box, const cv::Scalar& color, int thickness) {
-                const int x1 = static_cast<int>(doctor_display.cols * box[0]);
-                const int y1 = static_cast<int>(doctor_display.rows * box[1]);
-                const int x2 = static_cast<int>(doctor_display.cols * box[2]);
-                const int y2 = static_cast<int>(doctor_display.rows * box[3]);
-                cv::rectangle(doctor_display, cv::Point(x1, y1), cv::Point(x2, y2), color, thickness);
-            };
-            if (has_dynamic_roi) {
-                drawNormBox(dynamic_roi, cv::Scalar(255, 0, 0), 3);
-            } else {
-                cv::rectangle(
-                    doctor_display,
-                    cv::Point(guide_x1, 0),
-                    cv::Point(guide_x2, doctor_display.rows - 1),
-                    cv::Scalar(255, 255, 0),
-                    2);
-            }
+            cv::Mat doctor_display = patient_display.clone();
             cv::Mat patient_rgb;
             cv::cvtColor(patient_display, patient_rgb, cv::COLOR_BGR2RGB);
             QImage patient_image(
@@ -991,8 +1024,8 @@ QStringList SignController::workerArguments() const
         QStringLiteral("--camera"), QStringLiteral("21"),
         QStringLiteral("--width"), QStringLiteral("1280"),
         QStringLiteral("--height"), QStringLiteral("720"),
-        QStringLiteral("--pose-interval"), QStringLiteral("4"),
-        QStringLiteral("--hand-interval"), QStringLiteral("2"),
+        QStringLiteral("--pose-interval"), QStringLiteral("3"),
+        QStringLiteral("--hand-interval"), QStringLiteral("1"),
         QStringLiteral("--json-interval"), QStringLiteral("0.05"),
         QStringLiteral("--frame-stdin"),
         QStringLiteral("--composer"), QStringLiteral("rkllm"),
