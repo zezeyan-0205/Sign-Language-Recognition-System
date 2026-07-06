@@ -90,8 +90,8 @@ ROI_MODE_POSE_LOST = "POSE_LOST"
 # 预测稳定参数
 CONF_THRESHOLD = 0.65      # 演示优先：低于这个置信度，显示“识别中...”
 SMOOTH_WINDOW = 5          # 最近5次预测做投票
-MIN_VOTE_COUNT = 3         # 至少3票一致才更新显示
-TOKEN_ADD_INTERVAL = 1.5
+MIN_VOTE_COUNT = 2         # 至少2票一致才更新显示
+TOKEN_ADD_INTERVAL = 0.8
 TOKEN_UNLOCK_HAND_LOST_SEC = 0.50
 RECORDING_WARMUP_SEC = 0.60
 DELETE_READD_GRACE = 0.35
@@ -1396,6 +1396,12 @@ def main():
                     raw_pred = labels[pred_idx]
                     raw_conf = float(probs[0, pred_idx])
                     last_predict_time = now
+                    top_indices = np.argsort(probs[0])[-3:][::-1]
+                    top3_text = ", ".join(
+                        f"{labels[int(index)]}:{float(probs[0, int(index)]):.3f}"
+                        for index in top_indices
+                    )
+                    print(f"top3: {top3_text}", file=sys.stderr, flush=True)
 
                     if raw_conf >= CONF_THRESHOLD:
                         pred_history.append((raw_pred, raw_conf))

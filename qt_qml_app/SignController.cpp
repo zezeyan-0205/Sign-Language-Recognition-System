@@ -435,7 +435,7 @@ void SignController::resumeRecording()
 
 void SignController::stopRecording()
 {
-    if (!has_collected_tokens_) {
+    if (!has_collected_tokens_ && !isRecognizedWordText(current_word_)) {
         sentence_text_ = QStringLiteral("整理句子：请先进行手语识别后再按整理按钮");
         setStatus(QStringLiteral("请先完成至少一个词汇识别"));
         emit sentenceChanged();

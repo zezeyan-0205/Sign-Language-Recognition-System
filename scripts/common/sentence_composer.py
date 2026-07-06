@@ -11,6 +11,7 @@ TIME_WORDS = (*DAY_WORDS, *DAY_PERIOD_WORDS)
 NUMBER_WORDS = tuple(str(index) for index in range(1, 10))
 REPEATABLE_TOKENS = set(NUMBER_WORDS) | {"小时", "天", "次"}
 FILLER_TOKENS = {"我", "一起", "可以", "发生"}
+QUESTION_TOKENS = {"需要", "复查", "忌口", "多少", "多长", "时间", "可以"}
 
 DIRECT_SYMPTOMS = {
     "发烧": ("发烧", ("发烧", "发热")),
@@ -153,6 +154,53 @@ def duration_phrase(tokens):
     return ""
 
 
+def compose_question_rule(tokens):
+    compact = compact_tokens(tokens)
+    token_set = set(compact)
+    if not (token_set & QUESTION_TOKENS):
+        return ""
+
+    time_word = time_phrase(compact)
+    symptoms = symptom_phrases(compact)
+    symptom_text = "、".join(symptoms)
+    asks_duration = ("多少" in token_set or "多长" in token_set) and (
+        "时间" in token_set or "小时" in token_set
+    )
+
+    if "多少" in token_set and "次" in token_set:
+        if symptom_text:
+            return f"我{time_word}{symptom_text}多少次？"
+        return f"{time_word}多少次？" if time_word else "多少次？"
+
+    if "忌口" in token_set and asks_duration:
+        return f"我{time_word}需要忌口多长时间？"
+
+    if asks_duration:
+        if symptom_text:
+            return f"我{time_word}{symptom_text}需要多长时间？"
+        if "复查" in token_set:
+            return "复查需要多长时间？"
+        return "需要多长时间？"
+
+    if "复查" in token_set and "时间" in token_set:
+        return "我什么时候复查？"
+
+    if "复查" in token_set:
+        if "可以" in token_set:
+            return f"我{time_word}可以复查吗？"
+        if "需要" in token_set:
+            return f"我{time_word}需要复查吗？"
+        return f"我{time_word}需要复查吗？"
+
+    if "忌口" in token_set:
+        return f"我{time_word}需要忌口吗？"
+
+    if "需要" in token_set and symptom_text:
+        return f"我{time_word}{symptom_text}需要处理吗？"
+
+    return ""
+
+
 def extract_slots(tokens):
     compact = compact_tokens(tokens)
     return {
@@ -184,6 +232,10 @@ def compose_tokens_rule(tokens):
     compact = slots["tokens"]
     if not compact:
         return ""
+
+    question = compose_question_rule(compact)
+    if question:
+        return question
 
     token_set = set(compact)
     subject = slots["subject"]
@@ -318,6 +370,8 @@ def should_call_rkllm(tokens):
     slots = extract_slots(tokens)
     compact = slots["tokens"]
     if not compact:
+        return False
+    if compose_question_rule(compact):
         return False
     if slots["symptoms"]:
         return True

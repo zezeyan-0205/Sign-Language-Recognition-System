@@ -2870,9 +2870,12 @@ Window {
         function pendingDoctorQuestion() {
             if (nextComplaintReplyIndex < 0)
                 nextComplaintReplyIndex = 0
-            if (nextComplaintReplyIndex >= patientWindow.doctorReplyList.length)
+            if (patientWindow.doctorReplyList.length === 0)
                 return ""
-            return normalizeDoctorQuestion(patientWindow.doctorReplyList[nextComplaintReplyIndex].text)
+            var latestIndex = patientWindow.doctorReplyList.length - 1
+            if (latestIndex < nextComplaintReplyIndex)
+                return ""
+            return normalizeDoctorQuestion(patientWindow.doctorReplyList[latestIndex].text)
         }
 
         function tokenSummaryText() {
