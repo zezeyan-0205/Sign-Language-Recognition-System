@@ -18,6 +18,8 @@ QT_IM_MODULE="${QT_IM_MODULE:-fcitx}"
 XMODIFIERS="${XMODIFIERS:-@im=fcitx}"
 DSI_BACKLIGHT_PATH="${DSI_BACKLIGHT_PATH:-/sys/class/backlight/backlight-dsi0/brightness}"
 DSI_BRIGHTNESS="${DSI_BRIGHTNESS:-250}"
+TOUCH_DEVICE="${TOUCH_DEVICE:-generic ft5x06 (79)}"
+TOUCH_OUTPUT="${TOUCH_OUTPUT:-DSI-1}"
 
 LOG_DIR="${LOG_DIR:-$ROOT_DIR/artifacts/logs}"
 RKLLM_LOG="$LOG_DIR/rkllm_server.log"
@@ -101,6 +103,17 @@ start_input_method() {
     fcitx5 -d >/dev/null 2>&1 || echo "[run] failed to start fcitx5"
 }
 
+map_touchscreen() {
+    if ! command -v xinput >/dev/null 2>&1; then
+        echo "[run] xinput not found, touchscreen mapping will be skipped"
+        return 0
+    fi
+
+    echo "[run] mapping touchscreen '$TOUCH_DEVICE' to $TOUCH_OUTPUT"
+    DISPLAY="$DISPLAY" xinput map-to-output "$TOUCH_DEVICE" "$TOUCH_OUTPUT" \
+        || echo "[run] touchscreen mapping failed; check xinput list and xrandr --listmonitors"
+}
+
 if [[ ! -x "$QML_APP" ]]; then
     echo "[run] QML app not found, building SignLanguageQml ..."
     cmake -S "$ROOT_DIR" -B "$BUILD_DIR"
@@ -119,6 +132,7 @@ fi
 
 set_dsi_brightness
 start_input_method
+map_touchscreen
 
 if port_open; then
     echo "[run] rkllm server already running at http://$RKLLM_HOST:$RKLLM_PORT"

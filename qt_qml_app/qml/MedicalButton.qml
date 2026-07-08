@@ -77,19 +77,22 @@ Rectangle {
         PropertyAction { target: root; property: "feedbackHeld"; value: false }
     }
 
-    TapHandler {
+    MouseArea {
+        anchors.fill: parent
         enabled: root.enabled
-        gesturePolicy: TapHandler.WithinBounds
-        onPressedChanged: root.visualPressed = pressed
-        onTapped: {
+        hoverEnabled: true
+        onEntered: root.hovered = true
+        onExited: {
+            root.hovered = false
+            root.visualPressed = false
+        }
+        onPressed: root.visualPressed = true
+        onReleased: root.visualPressed = false
+        onCanceled: root.visualPressed = false
+        onClicked: {
             pressFeedback.restart()
             root.clicked()
         }
-    }
-
-    HoverHandler {
-        enabled: root.enabled
-        onHoveredChanged: root.hovered = hovered
     }
 
     Behavior on color {

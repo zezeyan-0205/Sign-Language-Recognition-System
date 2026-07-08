@@ -1166,7 +1166,7 @@ Window {
 	                                    color: "transparent"
 	                                    border.width: 1
 	                                    border.color: "#c96b6b"
-	                                    opacity: clearArea.pressed ? 0.72 : (clearHover.hovered ? 1.0 : 0.86)
+	                                    opacity: clearArea.pressed ? 0.72 : (clearArea.containsMouse ? 1.0 : 0.86)
 
 	                                    Text {
 		                                        anchors.centerIn: parent
@@ -1176,13 +1176,11 @@ Window {
 		                                        font.bold: true
 		                                    }
 
-                                    TapHandler {
+                                    MouseArea {
                                         id: clearArea
-                                        onTapped: doctorWindow.requestClearAllContent()
-                                    }
-
-                                    HoverHandler {
-                                        id: clearHover
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        onClicked: doctorWindow.requestClearAllContent()
                                     }
 	                                }
 	                            }
@@ -1382,7 +1380,7 @@ Window {
 
 		                            Item {
 		                                width: parent.width
-		                                height: 132
+		                                height: 172
 
 			                                Text {
 			                                    anchors.fill: parent
@@ -1397,7 +1395,7 @@ Window {
 			                                }
 
 		                                Repeater {
-		                                    model: 6
+		                                    model: 8
 
 		                                    Rectangle {
 		                                        width: parent.width
@@ -1413,10 +1411,10 @@ Window {
 			                            Text { width: parent.width; text: "现病史："; color: "#17324d"; font.pixelSize: 19; font.bold: true }
 			                            Item {
 			                                width: parent.width
-			                                height: 132
+			                                height: 92
 
 			                                Repeater {
-			                                    model: 6
+			                                    model: 4
 
 			                                    Rectangle {
 			                                        width: parent.width
@@ -1952,8 +1950,9 @@ Window {
                                             }
                                         }
 
-                                        TapHandler {
-                                            onTapped: doctorWindow.selectArchiveRecord(0)
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: doctorWindow.selectArchiveRecord(0)
                                         }
                                     }
 
@@ -2057,12 +2056,12 @@ Window {
                                                         }
                                                     }
 
-                                                    TapHandler {
-                                                        onTapped: doctorWindow.selectArchiveRecord(index + 1)
-                                                    }
-
-                                                    HoverHandler {
-                                                        onHoveredChanged: rowHovered = hovered
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        hoverEnabled: true
+                                                        onClicked: doctorWindow.selectArchiveRecord(index + 1)
+                                                        onEntered: rowHovered = true
+                                                        onExited: rowHovered = false
                                                     }
                                                 }
                                             }

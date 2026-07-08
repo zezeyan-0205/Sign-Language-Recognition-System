@@ -53,19 +53,16 @@ Rectangle {
         }
     }
 
-    TapHandler {
-        id: tapHandler
+    MouseArea {
+        anchors.fill: parent
         enabled: root.enabled
-        gesturePolicy: TapHandler.WithinBounds
-        onPressedChanged: {
-            if (pressed) {
-                pressFeedback.stop()
-                root.visualPressed = true
-            } else {
-                root.visualPressed = false
-            }
+        onPressed: {
+            pressFeedback.stop()
+            root.visualPressed = true
         }
-        onTapped: {
+        onReleased: root.visualPressed = false
+        onCanceled: root.visualPressed = false
+        onClicked: {
             pressFeedback.restart()
             root.clicked()
         }
