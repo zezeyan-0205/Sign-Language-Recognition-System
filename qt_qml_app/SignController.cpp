@@ -489,6 +489,29 @@ void SignController::clearExpression()
     sendWorkerCommand(QStringLiteral("clear"));
 }
 
+void SignController::setDepartment(const QString& department)
+{
+    QString normalized = department.trimmed().toLower();
+    if (normalized != QStringLiteral("digestive") &&
+        normalized != QStringLiteral("ent") &&
+        normalized != QStringLiteral("general")) {
+        normalized = QStringLiteral("general");
+    }
+
+    if (current_department_ == normalized) {
+        return;
+    }
+
+    current_department_ = normalized;
+    emit departmentChanged();
+
+    QJsonObject object;
+    object.insert(QStringLiteral("cmd"), QStringLiteral("set_department"));
+    object.insert(QStringLiteral("department"), current_department_);
+    sendWorkerObject(object);
+    appendLog(QStringLiteral("department selected: %1").arg(current_department_));
+}
+
 void SignController::readStdout()
 {
     stdout_buffer_.append(worker_.readAllStandardOutput());
@@ -631,6 +654,10 @@ void SignController::consumeJson(const QJsonObject& object)
         setStatus(QStringLiteral("点击开始按钮开始识别"));
         emit currentWordChanged();
         appendLog(QStringLiteral("worker ready"));
+        QJsonObject departmentCommand;
+        departmentCommand.insert(QStringLiteral("cmd"), QStringLiteral("set_department"));
+        departmentCommand.insert(QStringLiteral("department"), current_department_);
+        sendWorkerObject(departmentCommand);
         return;
     }
 
@@ -861,18 +888,51 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, height);
     cap.set(cv::CAP_PROP_FPS, 30);
     cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
-    // ========== 切换自动曝光（画面自动明暗调节）==========
-    //cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
 
-    // ========== 切换手动曝光（固定亮度，不会忽亮忽暗）==========
+    // 先让摄像头自动曝光预热，再锁定当前参数，避免识别中亮度忽明忽暗。
+    cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 3);
+    QMetaObject::invokeMethod(
+        this,
+        [this]() {
+            current_word_ = QStringLiteral("正在校准光照...");
+            setStatus(QStringLiteral("正在校准光照"));
+            emit currentWordChanged();
+        },
+        Qt::QueuedConnection);
+    const auto warmup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    cv::Mat warmup_frame;
+    while (!preview_stop_.load() && std::chrono::steady_clock::now() < warmup_deadline) {
+        cap.read(warmup_frame);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    const double locked_exposure = cap.get(cv::CAP_PROP_EXPOSURE);
+    const double locked_gain = cap.get(cv::CAP_PROP_GAIN);
+    const double locked_brightness = cap.get(cv::CAP_PROP_BRIGHTNESS);
     cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 1);
-    cap.set(cv::CAP_PROP_EXPOSURE, 400);
-    //cap.set(cv::CAP_PROP_GAIN, 0);
+    if (locked_exposure > 0) {
+        cap.set(cv::CAP_PROP_EXPOSURE, locked_exposure);
+    }
+    if (locked_gain >= 0) {
+        cap.set(cv::CAP_PROP_GAIN, locked_gain);
+    }
+    cap.set(cv::CAP_PROP_BRIGHTNESS, locked_brightness);
 
     QMetaObject::invokeMethod(
         this,
-        [this, exposure = cap.get(cv::CAP_PROP_EXPOSURE), gain = cap.get(cv::CAP_PROP_GAIN)]() {
-            appendLog(QStringLiteral("Qt camera exposure=%1 gain=%2").arg(exposure).arg(gain));
+        [this,
+         exposure = cap.get(cv::CAP_PROP_EXPOSURE),
+         gain = cap.get(cv::CAP_PROP_GAIN),
+         brightness = cap.get(cv::CAP_PROP_BRIGHTNESS)]() {
+            appendLog(QStringLiteral("Qt camera locked exposure=%1 gain=%2 brightness=%3")
+                          .arg(exposure)
+                          .arg(gain)
+                          .arg(brightness));
+            if (current_word_ == QStringLiteral("正在校准光照...")) {
+                current_word_ = QStringLiteral("点击开始按钮开始识别");
+                setStatus(QStringLiteral("点击开始按钮开始识别"));
+                emit currentWordChanged();
+            }
         },
         Qt::QueuedConnection);
 
@@ -886,6 +946,7 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
         }
         capture_frames_.fetch_add(1, std::memory_order_relaxed);
 
+        const auto now = std::chrono::steady_clock::now();
         if ((camera_view_ || doctor_camera_view_) && !preview_update_pending_.exchange(true)) {
             cv::Mat base_display = frame.clone();
             const int preview_width = 960;
@@ -951,7 +1012,6 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
         QByteArray worker_frame_line;
         int worker_frame_width = 0;
         int worker_frame_height = 0;
-        const auto now = std::chrono::steady_clock::now();
         if (recording_active_.load() && now - last_worker_encode_time >= std::chrono::milliseconds(50)) {
             last_worker_encode_time = now;
 
@@ -990,15 +1050,22 @@ void SignController::capturePreviewFrames(int cameraId, int width, int height)
 
 void SignController::sendWorkerCommand(const QString& command)
 {
+    QJsonObject object;
+    object.insert(QStringLiteral("cmd"), command);
+    sendWorkerObject(object);
+}
+
+void SignController::sendWorkerObject(const QJsonObject& object)
+{
     if (worker_.state() == QProcess::NotRunning) {
         appendLog(QStringLiteral("worker is not running"));
         return;
     }
 
-    QJsonObject object;
-    object.insert(QStringLiteral("cmd"), command);
     worker_.write(QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n');
-    appendLog(QStringLiteral("command: %1, pending stdin bytes: %2").arg(command).arg(worker_.bytesToWrite()));
+    appendLog(QStringLiteral("command: %1, pending stdin bytes: %2")
+                  .arg(object.value(QStringLiteral("cmd")).toString())
+                  .arg(worker_.bytesToWrite()));
 }
 
 QString SignController::projectPath(const QString& relativePath) const

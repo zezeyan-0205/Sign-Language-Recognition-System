@@ -31,6 +31,7 @@ class SignController : public QObject {
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(bool recordingActive READ recordingActive NOTIFY recordingChanged)
     Q_PROPERTY(bool recordingPaused READ recordingPaused NOTIFY recordingChanged)
+    Q_PROPERTY(QString currentDepartment READ currentDepartment NOTIFY departmentChanged)
 
 public:
     explicit SignController(QObject* parent = nullptr);
@@ -50,6 +51,7 @@ public:
     bool running() const { return running_; }
     bool recordingActive() const { return recording_active_.load(); }
     bool recordingPaused() const { return recording_paused_; }
+    QString currentDepartment() const { return current_department_; }
 
     Q_INVOKABLE void startSystem();
     Q_INVOKABLE void stopSystem();
@@ -59,6 +61,7 @@ public:
     Q_INVOKABLE void stopRecording();
     Q_INVOKABLE void deleteLastToken();
     Q_INVOKABLE void clearExpression();
+    Q_INVOKABLE void setDepartment(const QString& department);
     Q_INVOKABLE void bindDoctorCameraView(QObject* cameraView);
     Q_INVOKABLE QString saveMedicalRecord(const QString& jsonText,
                                           const QString& plainText,
@@ -78,6 +81,7 @@ signals:
     void progressChanged();
     void runningChanged();
     void recordingChanged();
+    void departmentChanged();
     void logLine(const QString& line);
 
 private slots:
@@ -98,6 +102,7 @@ private:
     void stopLocalPreview();
     void capturePreviewFrames(int cameraId, int width, int height);
     void sendWorkerCommand(const QString& command);
+    void sendWorkerObject(const QJsonObject& object);
     QString projectPath(const QString& relativePath) const;
     QStringList workerArguments() const;
     void setRunning(bool running);
@@ -148,6 +153,7 @@ private:
     QString tokens_text_ = QStringLiteral("已收集词汇：-");
     QString sentence_text_ = QStringLiteral("整理句子：-");
     QString composer_text_ = QStringLiteral("整理来源：-");
+    QString current_department_ = QStringLiteral("general");
     int collect_progress_ = 0;
     std::atomic_bool recording_active_{false};
     bool recording_paused_ = false;

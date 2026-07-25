@@ -463,8 +463,8 @@ Window {
             Item {
                 width: parent.width
                 height: compactPatient
-                    ? Math.max(4, parent.height - 104 - 104 - 44 - 34 - 136 - 110 - spacing * 7)
-                    : Math.max(12, parent.height - 150 - 150 - 60 - 44 - 214 - 150 - spacing * 7)
+                    ? Math.max(4, parent.height - 104 - 104 - 44 - 34 - 136 - 110 - parent.spacing * 7)
+                    : Math.max(12, parent.height - 150 - 150 - 60 - 44 - 214 - 150 - parent.spacing * 7)
             }
 
             MedicalProgressBar {
@@ -699,6 +699,7 @@ Window {
         property string treatmentPlan: ""
         property string doctorSignature: ""
         property string doctorReplyDraft: ""
+        property string currentDepartment: "general"
         property int nextComplaintReplyIndex: 0
         property bool disconnectedWarning: false
         property int navWidth: 108
@@ -968,25 +969,128 @@ Window {
                         }
                     }
 
-                    Item {
-                        width: parent.width - parent.width * 0.48 - 18
-                        height: parent.height
+	                    Item {
+	                        width: parent.width - parent.width * 0.48 - 18
+	                        height: parent.height
 
-                        Text {
-                            anchors.right: homeServiceButtons.left
-                            anchors.rightMargin: 18
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: Math.max(120, parent.width - homeServiceButtons.width - 210)
-                            text: doctorWindow.homeStatusLine()
-                            color: theme.doctorText
-                            font.pixelSize: 18
+	                        Text {
+	                            anchors.right: departmentSelector.left
+	                            anchors.rightMargin: 12
+	                            anchors.verticalCenter: parent.verticalCenter
+	                            width: Math.max(90, parent.width - homeServiceButtons.width - departmentSelector.width - 218)
+	                            text: doctorWindow.homeStatusLine()
+	                            color: theme.doctorText
+	                            font.pixelSize: 18
                             font.bold: true
                             horizontalAlignment: Text.AlignRight
-                            elide: Text.ElideRight
-                        }
+	                            elide: Text.ElideRight
+	                        }
 
-                        Row {
-                            id: homeServiceButtons
+                            Rectangle {
+                                id: departmentSelector
+                                anchors.right: homeServiceButtons.left
+                                anchors.rightMargin: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 150
+                                height: 48
+                                radius: 8
+                                color: "#eef6fb"
+                                border.width: 1
+                                border.color: departmentMenu.visible ? "#2f8fb8" : "#bfd0dc"
+                                z: 20
+
+                                Row {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 10
+                                    spacing: 8
+
+                                    Text {
+                                        width: parent.width - 24
+                                        height: parent.height
+                                        text: doctorWindow.departmentTitle(doctorWindow.currentDepartment)
+                                        color: "#17324d"
+                                        font.pixelSize: 17
+                                        font.bold: true
+                                        verticalAlignment: Text.AlignVCenter
+                                        elide: Text.ElideRight
+                                    }
+
+                                    Text {
+                                        width: 16
+                                        height: parent.height
+                                        text: departmentMenu.visible ? "▲" : "▼"
+                                        color: "#557184"
+                                        font.pixelSize: 13
+                                        verticalAlignment: Text.AlignVCenter
+                                        horizontalAlignment: Text.AlignHCenter
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: departmentMenu.visible = !departmentMenu.visible
+                                }
+                            }
+
+                            Rectangle {
+                                id: departmentMenu
+                                anchors.top: departmentSelector.bottom
+                                anchors.right: departmentSelector.right
+                                anchors.topMargin: 6
+                                width: departmentSelector.width
+                                height: visible ? 132 : 0
+                                radius: 8
+                                color: "#ffffff"
+                                border.width: 1
+                                border.color: "#bfd0dc"
+                                visible: false
+                                clip: true
+                                z: 30
+
+                                Column {
+                                    anchors.fill: parent
+                                    anchors.margins: 6
+                                    spacing: 4
+
+                                    Repeater {
+                                        model: [
+                                            { "label": "全科", "value": "general" },
+                                            { "label": "消化科", "value": "digestive" },
+                                            { "label": "耳鼻喉科", "value": "ent" }
+                                        ]
+
+                                        Rectangle {
+                                            width: parent.width
+                                            height: 36
+                                            radius: 7
+                                            color: doctorWindow.currentDepartment === modelData.value ? "#dceff8" : "#ffffff"
+
+                                            Text {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 10
+                                                anchors.rightMargin: 10
+                                                text: modelData.label
+                                                color: doctorWindow.currentDepartment === modelData.value ? "#176b90" : "#315064"
+                                                font.pixelSize: 15
+                                                font.bold: doctorWindow.currentDepartment === modelData.value
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: {
+                                                    doctorWindow.selectDepartment(modelData.value)
+                                                    departmentMenu.visible = false
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+	                        Row {
+	                            id: homeServiceButtons
                             anchors.right: parent.right
                             anchors.rightMargin: 172
                             anchors.verticalCenter: parent.verticalCenter
@@ -1185,14 +1289,14 @@ Window {
 	                                }
 	                            }
 
-				                            Item {
-				                                width: parent.width
-				                                height: Math.max(0, parent.height - 48 - 1 - 298 - 20 - 66 - 66 - 270 - 84)
-				                            }
+					                            Item {
+					                                width: parent.width
+					                                height: Math.max(0, parent.height - 48 - 1 - 298 - 20 - 66 - 66 - 300 - 84)
+					                            }
 
-				                            Rectangle {
-				                                width: parent.width
-				                                height: 270
+					                            Rectangle {
+					                                width: parent.width
+					                                height: 300
 			                                radius: 8
 			                                color: "#f2f7fb"
 	                                border.width: 1
@@ -1203,18 +1307,18 @@ Window {
 	                                    anchors.margins: 12
 	                                    spacing: 8
 
-		                                    Text {
-		                                        width: parent.width
-		                                        text: "医生回复"
-		                                        color: "#17324d"
-		                                        font.pixelSize: 20
-		                                        font.bold: true
-		                                        elide: Text.ElideRight
-		                                    }
+			                                    Text {
+			                                        width: parent.width
+			                                        text: "医生回复"
+			                                        color: "#17324d"
+			                                        font.pixelSize: 20
+			                                        font.bold: true
+			                                        elide: Text.ElideRight
+			                                    }
 
-		                                    Row {
-		                                        width: parent.width
-		                                        height: 58
+				                                    Row {
+			                                        width: parent.width
+			                                        height: 58
 		                                        spacing: 10
 
 	                                        Rectangle {
@@ -1263,16 +1367,48 @@ Window {
 	                                            activeColor: theme.blueDeep
 	                                            inactiveColor: "#b8c4cf"
 	                                            enabled: doctorWindow.doctorReplyDraft.trim().length > 0
-	                                            onClicked: doctorWindow.sendDoctorReply()
-	                                        }
-	                                    }
+		                                            onClicked: doctorWindow.sendDoctorReply()
+		                                        }
+		                                    }
 
-		                                    Text {
-		                                        width: parent.width
-		                                        height: 96
-		                                        text: doctorWindow.latestDoctorReplyText()
-		                                        color: "#586575"
-		                                        font.pixelSize: 16
+                                                Flow {
+                                                    width: parent.width
+                                                    height: 78
+                                                    spacing: 8
+
+                                                    Repeater {
+                                                        model: doctorWindow.departmentTemplates()
+
+                                                        Rectangle {
+                                                            width: Math.min(150, Math.max(92, modelData.length * 16 + 28))
+                                                            height: 34
+                                                            radius: 8
+                                                            color: "#e7f0f6"
+                                                            border.width: 1
+                                                            border.color: "#c4d3de"
+
+                                                            Text {
+                                                                anchors.centerIn: parent
+                                                                text: modelData
+                                                                color: "#315064"
+                                                                font.pixelSize: 14
+                                                                font.bold: true
+                                                            }
+
+                                                            MouseArea {
+                                                                anchors.fill: parent
+                                                                onClicked: doctorWindow.useDoctorReplyTemplate(modelData)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+				                                    Text {
+				                                        width: parent.width
+				                                        height: 36
+			                                        text: doctorWindow.latestDoctorReplyText()
+			                                        color: "#586575"
+			                                        font.pixelSize: 16
 	                                        wrapMode: Text.WordWrap
 	                                        maximumLineCount: 2
 	                                        elide: Text.ElideRight
@@ -2744,6 +2880,34 @@ Window {
             placeholderPageTitle = navItems[index].title
             placeholderPageHint = doctorWindow.placeholderHint(index)
             doctorStack.replace(doctorPlaceholderComponent)
+        }
+
+        function departmentTitle(department) {
+            if (department === "digestive")
+                return "消化科"
+            if (department === "ent")
+                return "耳鼻喉科"
+            return "全科"
+        }
+
+        function selectDepartment(department) {
+            currentDepartment = department
+            signController.setDepartment(department)
+            doctorToast = "已切换至" + departmentTitle(department)
+        }
+
+        function departmentTemplates() {
+            if (currentDepartment === "digestive") {
+                return ["哪里不舒服？", "拉了几次？", "持续多久了？", "有没有发烧？", "需要忌口多久？", "什么时候复查？"]
+            }
+            if (currentDepartment === "ent") {
+                return ["哪里不舒服？", "有没有鼻出血？", "有没有流鼻涕？", "有没有咳嗽？", "头疼多久了？", "有没有发烧？"]
+            }
+            return ["哪里不舒服？", "什么时候开始的？", "持续多长时间？", "还有其他症状吗？", "需要帮助吗？"]
+        }
+
+        function useDoctorReplyTemplate(text) {
+            doctorReplyDraft = text
         }
 
         function placeholderHint(index) {

@@ -9,6 +9,7 @@ import mediapipe as mp
 DEFAULT_SEQ_LEN = 30
 COUNTDOWN_SEC = 1
 DEFAULT_RECORD_SEC = 1.5
+SHOW_CAPTURE_HINTS = False
 
 POSE_DIM = 33 * 4
 HAND_DIM = 21 * 3
@@ -97,14 +98,15 @@ def draw_roi(frame):
 
     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
 
-    put_text(
-        frame,
-        "Hand ROI",
-        (x1, max(25, y1 + 25)),
-        scale=0.7,
-        color=(255, 255, 0),
-        thickness=2
-    )
+    if SHOW_CAPTURE_HINTS:
+        put_text(
+            frame,
+            "Hand ROI",
+            (x1, max(25, y1 + 25)),
+            scale=0.7,
+            color=(255, 255, 0),
+            thickness=2
+        )
 
 
 def extract_pose(pose_result):
@@ -371,44 +373,48 @@ def main():
             draw_hands(frame, hand_result)
             draw_roi(frame)
 
-            put_text(frame, f"Label: {args.label}", (30, 50))
-            put_text(frame, f"Saved: {sample_index - 1}", (30, 90))
-            put_text(frame, f"FPS: {fps:.1f}  Hands: {hands_now}", (30, 130), scale=0.75)
-            put_text(frame, "SPACE: collect   q: quit", (30, 165), scale=0.75)
+            if SHOW_CAPTURE_HINTS:
+                put_text(frame, f"Label: {args.label}", (30, 50))
+                put_text(frame, f"Saved: {sample_index - 1}", (30, 90))
+                put_text(frame, f"FPS: {fps:.1f}  Hands: {hands_now}", (30, 130), scale=0.75)
+                put_text(frame, "SPACE: collect   q: quit", (30, 165), scale=0.75)
 
             if state == "idle":
-                put_text(
-                    frame,
-                    "READY",
-                    (30, 220),
-                    scale=1.2,
-                    color=(0, 255, 0),
-                    thickness=3
-                )
+                if SHOW_CAPTURE_HINTS:
+                    put_text(
+                        frame,
+                        "READY",
+                        (30, 220),
+                        scale=1.2,
+                        color=(0, 255, 0),
+                        thickness=3
+                    )
 
             elif state == "countdown":
                 elapsed = time.time() - countdown_start
                 remain = COUNTDOWN_SEC - int(elapsed)
 
                 if remain > 0:
-                    put_text(
-                        frame,
-                        str(remain),
-                        (frame.shape[1] // 2 - 40, frame.shape[0] // 2),
-                        scale=4.0,
-                        color=(0, 255, 255),
-                        thickness=6
-                    )
-                else:
-                    if args.require_hand and hands_now < 1:
+                    if SHOW_CAPTURE_HINTS:
                         put_text(
                             frame,
-                            "Show your hand first...",
-                            (30, 280),
-                            scale=1.0,
+                            str(remain),
+                            (frame.shape[1] // 2 - 40, frame.shape[0] // 2),
+                            scale=4.0,
                             color=(0, 255, 255),
-                            thickness=3
+                            thickness=6
                         )
+                else:
+                    if args.require_hand and hands_now < 1:
+                        if SHOW_CAPTURE_HINTS:
+                            put_text(
+                                frame,
+                                "Show your hand first...",
+                                (30, 280),
+                                scale=1.0,
+                                color=(0, 255, 255),
+                                thickness=3
+                            )
                     else:
                         state = "collecting"
                         raw_sequence = []
@@ -425,29 +431,30 @@ def main():
                 bar_w, bar_h = 400, 25
                 fill_w = int(bar_w * progress)
 
-                cv2.rectangle(
-                    frame,
-                    (bar_x, bar_y),
-                    (bar_x + bar_w, bar_y + bar_h),
-                    (255, 255, 255),
-                    2
-                )
-                cv2.rectangle(
-                    frame,
-                    (bar_x, bar_y),
-                    (bar_x + fill_w, bar_y + bar_h),
-                    (0, 0, 255),
-                    -1
-                )
+                if SHOW_CAPTURE_HINTS:
+                    cv2.rectangle(
+                        frame,
+                        (bar_x, bar_y),
+                        (bar_x + bar_w, bar_y + bar_h),
+                        (255, 255, 255),
+                        2
+                    )
+                    cv2.rectangle(
+                        frame,
+                        (bar_x, bar_y),
+                        (bar_x + fill_w, bar_y + bar_h),
+                        (0, 0, 255),
+                        -1
+                    )
 
-                put_text(
-                    frame,
-                    f"REC {elapsed:.2f}/{args.record_sec:.2f}s  raw={len(raw_sequence)}",
-                    (30, 285),
-                    scale=1.0,
-                    color=(0, 0, 255),
-                    thickness=3
-                )
+                    put_text(
+                        frame,
+                        f"REC {elapsed:.2f}/{args.record_sec:.2f}s  raw={len(raw_sequence)}",
+                        (30, 285),
+                        scale=1.0,
+                        color=(0, 0, 255),
+                        thickness=3
+                    )
 
                 if elapsed >= args.record_sec:
                     data = resample_sequence(raw_sequence, target_len=args.seq_len)

@@ -93,9 +93,32 @@ SMOOTH_WINDOW = 5          # 最近5次预测做投票
 MIN_VOTE_COUNT = 2         # 至少2票一致才更新显示
 TOKEN_ADD_INTERVAL = 0.8
 TOKEN_UNLOCK_HAND_LOST_SEC = 0.50
-RECORDING_WARMUP_SEC = 0.60
+RECORDING_WARMUP_SEC = 1.50
 DELETE_READD_GRACE = 0.35
 RECOGNITION_STALE_SEC = 2.8
+
+# 临赛前的词汇纠偏规则：只处理已知易混词，避免影响其他类别。
+JIKOU_FUCHA_MAX_FUCHA_CONF = 0.70
+JIKOU_FUCHA_MIN_JIKOU_CONF = 0.25
+JIKOU_FUCHA_MAX_MARGIN = 0.25
+
+DEPARTMENT_FILTER_TOP_K = 5
+DEPARTMENT_MIN_CANDIDATE_CONF = 0.20
+BASE_VOCAB = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    "我", "今天", "昨天", "明天", "现在", "早上", "中午", "下午", "晚上",
+    "到", "一起", "多少", "时间", "小时", "次",
+    "需要", "可以", "没有", "不知道", "谢谢",
+}
+DEPARTMENT_SPECIAL_VOCABS = {
+    "digestive": {"拉肚子", "疼痛", "发烧", "忌口", "复查", "经常"},
+    "ent": {"鼻", "流鼻涕", "流血", "咳嗽", "头", "疼痛", "发烧", "复查", "经常"},
+}
+DEPARTMENT_NAMES = {
+    "general": "全科",
+    "digestive": "消化科",
+    "ent": "耳鼻喉科",
+}
 # ================= MediaPipe =================
 BaseOptions = mp.tasks.BaseOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
@@ -196,6 +219,84 @@ def softmax(logits):
     shifted = logits - np.max(logits, axis=1, keepdims=True)
     exp_values = np.exp(shifted)
     return exp_values / np.sum(exp_values, axis=1, keepdims=True)
+
+
+def apply_domain_corrections(raw_pred, raw_conf, labels, probs, top_indices):
+    """Fix a small set of known demo-time confusions before voting."""
+    ordered_labels = [labels[int(index)] for index in top_indices]
+    candidate_scores = {
+        labels[int(index)]: float(probs[0, int(index)])
+        for index in top_indices
+    }
+
+    if len(ordered_labels) >= 2 and ordered_labels[0] == "不知道" and ordered_labels[1] == "发烧":
+        fever_conf = candidate_scores["发烧"]
+        print(
+            "domain correction: 不知道->发烧 "
+            f"buzhidao={raw_conf:.3f} fashao={fever_conf:.3f} corrected_conf={raw_conf:.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return "发烧", raw_conf
+
+    if raw_pred != "复查":
+        return raw_pred, raw_conf
+
+    jikou_conf = candidate_scores.get("忌口")
+    if jikou_conf is None:
+        return raw_pred, raw_conf
+
+    margin = raw_conf - jikou_conf
+    should_prefer_jikou = (
+        raw_conf <= JIKOU_FUCHA_MAX_FUCHA_CONF and
+        jikou_conf >= JIKOU_FUCHA_MIN_JIKOU_CONF and
+        margin <= JIKOU_FUCHA_MAX_MARGIN
+    )
+    if should_prefer_jikou:
+        print(
+            "domain correction: 复查->忌口 "
+            f"fucha={raw_conf:.3f} jikou={jikou_conf:.3f} margin={margin:.3f} "
+            f"corrected_conf={raw_conf:.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return "忌口", raw_conf
+
+    return raw_pred, raw_conf
+
+
+def department_vocab(department):
+    if department == "general":
+        return None
+    return BASE_VOCAB | DEPARTMENT_SPECIAL_VOCABS.get(department, set())
+
+
+def apply_department_filter(raw_pred, raw_conf, labels, probs, top_indices, department):
+    vocab = department_vocab(department)
+    if vocab is None or raw_pred in vocab:
+        return raw_pred, raw_conf
+
+    for index in top_indices[:DEPARTMENT_FILTER_TOP_K]:
+        label = labels[int(index)]
+        conf = float(probs[0, int(index)])
+        if label in vocab and conf >= DEPARTMENT_MIN_CANDIDATE_CONF:
+            print(
+                "department filter: "
+                f"{DEPARTMENT_NAMES.get(department, department)} {raw_pred}->{label} "
+                f"raw_conf={raw_conf:.3f} candidate_conf={conf:.3f}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return label, conf
+
+    print(
+        "department filter blocked: "
+        f"{DEPARTMENT_NAMES.get(department, department)} {raw_pred} conf={raw_conf:.3f}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return "识别中...", 0.0
+
 
 def normalize_keypoints(data):
     """
@@ -894,21 +995,17 @@ def resample_sequence(seq, target_len=SEQ_LEN):
 
 def extract_keypoints(pose_result, hand_result, dynamic_roi_tracker):
     target_pose, person_bbox, body_roi = select_target_pose(pose_result)
-    # 识别输入尽量保持和原始版本一致：TCN 使用 MediaPipe 返回的第一组 pose。
-    # target_pose / dynamic ROI 只给医生端调试框使用，暂不参与关键点特征过滤。
-    original_pose = pose_result.pose_landmarks[0] if pose_result and pose_result.pose_landmarks else None
-    pose = extract_pose(original_pose)
-    original_left_hand, original_right_hand = extract_original_hands(hand_result)
+    pose = extract_pose(target_pose)
     _, _, candidates, debug_hands = extract_hands(hand_result, target_pose, body_roi, dynamic_roi_tracker)
     dynamic_roi, roi_mode = dynamic_roi_tracker.update(
         person_bbox,
         body_roi,
         [item["landmarks"] for item in candidates],
     )
-    # 动态 ROI 暂时只用于医生端调试显示，不参与识别过滤。
-    # 识别仍走原来的中心 ROI 手部逻辑，方便对比精度是否恢复。
-    left_hand, right_hand = original_left_hand, original_right_hand
-    kept_hands = []
+    # 只把 target_pose 附近的手送入识别；dynamic_roi 仍仅用于调试画框，不改变识别范围。
+    left_hand, right_hand, kept_hands = fill_hands_from_candidates(candidates, None)
+    pose_count = len(pose_result.pose_landmarks) if pose_result and pose_result.pose_landmarks else 0
+    ignored_hands = sum(1 for item in debug_hands if not item["valid"])
     debug = {
         "target_pose": target_pose,
         "person_bbox": person_bbox,
@@ -917,6 +1014,9 @@ def extract_keypoints(pose_result, hand_result, dynamic_roi_tracker):
         "roi_mode": roi_mode,
         "hands": debug_hands,
         "valid_hands": len(kept_hands),
+        "ignored_hands": ignored_hands,
+        "pose_count": pose_count,
+        "multi_person": pose_count > 1,
     }
     return np.concatenate([pose, left_hand, right_hand]).astype(np.float32), debug
 
@@ -1102,6 +1202,7 @@ def main():
     last_sentence_source = ""
     last_valid_hand_time = 0.0
     hand_lost_frames = 0
+    active_department = "general"
     command_reader = StdinCommandReader()
     command_reader.start()
 
@@ -1263,6 +1364,16 @@ def main():
                     last_sentence_source = ""
                     emit_json("tokens", tokens=token_buffer)
                     emit_json("sentence", tokens=token_buffer, sentence=last_sentence, composer=last_sentence_source)
+                elif cmd == "set_department":
+                    department = str(command.get("department", "general")).strip().lower()
+                    if department not in DEPARTMENT_NAMES:
+                        department = "general"
+                    active_department = department
+                    print(
+                        f"department set: {DEPARTMENT_NAMES.get(active_department, active_department)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 else:
                     emit_json("warning", message=f"unknown command: {cmd}")
 
@@ -1318,9 +1429,18 @@ def main():
             keypoints, tracking_debug = extract_keypoints(last_pose_result, last_hand_result, dynamic_roi_tracker)
             target_pose_valid = tracking_debug.get("target_pose") is not None
             valid_hand_count = int(tracking_debug.get("valid_hands", 0))
+            locating_patient = recording and now - recording_started_at < RECORDING_WARMUP_SEC
 
             hands_valid = has_valid_hand(keypoints)
-            if hands_valid:
+            if locating_patient:
+                sequence.clear()
+                pred_history.clear()
+                display_pred = "正在定位患者"
+                display_conf = 0.0
+                last_valid_hand_time = 0.0
+                hand_lost_frames = 0
+                recognition_wait_started_at = 0.0
+            elif hands_valid:
                 # 有手时，把当前帧加入“最近 WINDOW_SEC 秒”的时间窗口
                 sequence.append((now, keypoints))
                 last_valid_hand_time = now
@@ -1343,7 +1463,9 @@ def main():
                     display_pred = "等待中..."
                     display_conf = 0.0
                     recognition_wait_started_at = 0.0
-            if not target_pose_valid:
+            if locating_patient:
+                pass
+            elif not target_pose_valid:
                 display_pred = "请患者站在识别框内"
                 display_conf = 0.0
                 pred_history.clear()
@@ -1396,12 +1518,18 @@ def main():
                     raw_pred = labels[pred_idx]
                     raw_conf = float(probs[0, pred_idx])
                     last_predict_time = now
-                    top_indices = np.argsort(probs[0])[-3:][::-1]
+                    top_indices = np.argsort(probs[0])[-DEPARTMENT_FILTER_TOP_K:][::-1]
                     top3_text = ", ".join(
                         f"{labels[int(index)]}:{float(probs[0, int(index)]):.3f}"
-                        for index in top_indices
+                        for index in top_indices[:3]
                     )
                     print(f"top3: {top3_text}", file=sys.stderr, flush=True)
+                    raw_pred, raw_conf = apply_domain_corrections(
+                        raw_pred, raw_conf, labels, probs, top_indices
+                    )
+                    raw_pred, raw_conf = apply_department_filter(
+                        raw_pred, raw_conf, labels, probs, top_indices, active_department
+                    )
 
                     if raw_conf >= CONF_THRESHOLD:
                         pred_history.append((raw_pred, raw_conf))
@@ -1437,7 +1565,7 @@ def main():
             stable_token_candidate = (
                 recording and
                 now - recording_started_at >= RECORDING_WARMUP_SEC and
-                display_pred not in ("等待中...", "识别中...", "请患者站在识别框内", "等待手部进入识别区") and
+                display_pred not in ("等待中...", "识别中...", "正在定位患者", "请患者站在识别框内", "等待手部进入识别区") and
                 display_conf >= CONF_THRESHOLD and
                 display_pred != last_added_token and
                 not (display_pred == deleted_token and now < deleted_until) and
@@ -1466,6 +1594,7 @@ def main():
                 dynamic_roi = tracking_debug.get("dynamic_roi")
                 body_roi = tracking_debug.get("body_roi")
                 person_bbox = tracking_debug.get("person_bbox")
+                multi_person = bool(tracking_debug.get("multi_person", False))
                 def serialize_box(box):
                     if box is None:
                         return None
@@ -1493,9 +1622,17 @@ def main():
                     body_roi=serialize_box(body_roi),
                     person_bbox=serialize_box(person_bbox),
                     tracking_status=(
-                        "请患者站在识别框内"
-                        if not target_pose_valid
-                        else ("追踪中" if valid_hand_count > 0 else "等待手部")
+                        "正在定位患者"
+                        if locating_patient
+                        else (
+                            "请患者站在识别框内"
+                            if not target_pose_valid
+                            else (
+                                "检测到多人干扰，请保持患者单独处于识别区域"
+                                if multi_person
+                                else ("追踪中" if valid_hand_count > 0 else "等待手部")
+                            )
+                        )
                     ),
                     hand_lost_frames=int(hand_lost_frames),
                     sequence_frames=raw_frame_count,
